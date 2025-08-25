@@ -1,10 +1,11 @@
 #!/bin/bash
 set -e
 
-# ========================================================
+# ============================================
 #  5echo CLI - Tools by 5echo.io
 #  Version: 1.1.0
-# ========================================================
+#  https://5echo.io
+# ============================================
 
 # Colors
 GREEN="\e[32m"
@@ -15,17 +16,14 @@ NC="\e[0m" # Reset
 
 REPO_BASE="https://raw.githubusercontent.com/5echo-io/scripts/main"
 CLI_PATH="/usr/local/bin/5echo"
-SCRIPT_NAME="5echo"
+CLI_URL="$REPO_BASE/5echo"
 
-# Minimal banner
+# Banner
 banner() {
-    echo -e "${BLUE}==============================================${NC}"
-    echo -e "${BLUE}               5echo CLI Tool                ${NC}"
-    echo -e "${BLUE}==============================================${NC}"
-    echo -e "${YELLOW} Run powerful tools with: 5echo install ... ${NC}\n"
+    echo -e "${BLUE}🛠️  5echo CLI - Tools by 5echo.io${NC}"
 }
 
-# Spinner loader
+# Spinner
 loading() {
     local message="$1"
     shift
@@ -39,7 +37,7 @@ loading() {
     while kill -0 $pid 2>/dev/null; do
         printf "\r${BLUE}${message}${NC} ${spin:$i:1}"
         i=$(( (i + 1) % 4 ))
-        sleep 0.1
+        sleep 0.2
     done
 
     wait $pid
@@ -53,30 +51,30 @@ loading() {
     fi
 }
 
-# Show help
+# Help text
 show_help() {
     banner
-    echo -e "${BLUE}Usage:${NC}"
-    echo -e "  5echo install <package>    Install a supported package"
-    echo -e "  5echo update               Update this CLI to latest version"
-    echo -e "  5echo help                 Show this help text"
+    echo -e "\nUsage:"
+    echo "  5echo install <package>    Install a supported package"
+    echo "  5echo update               Update this CLI to latest version"
+    echo "  5echo help                 Show this help text"
     echo ""
-    echo -e "${BLUE}Supported packages:${NC}"
-    echo -e "  docker         Install Docker CE"
-    echo -e "  uptime-kuma    Install Uptime Kuma monitoring"
+    echo "Supported packages:"
+    echo "  docker         Install Docker CE"
+    echo "  uptime-kuma    Install Uptime Kuma monitoring"
     echo ""
-    echo -e "${YELLOW}Powered by 5echo.io${NC}"
-    echo -e "${BLUE}2025 © 5echo.io${NC}"
 }
 
-# Install packages
+# Package installer
 install_package() {
     case "$1" in
         docker)
-            loading "Installing Docker" bash -c "curl -sL $REPO_BASE/install-docker.sh | bash"
+            echo -e "${YELLOW}🔧 Installing Docker...${NC}"
+            curl -sL "$REPO_BASE/install-docker.sh" | bash
             ;;
         uptime-kuma)
-            loading "Installing Uptime Kuma" bash -c "curl -sL $REPO_BASE/install-uptime-kuma.sh | bash"
+            echo -e "${YELLOW}🔧 Installing Uptime Kuma...${NC}"
+            curl -sL "$REPO_BASE/install-uptime-kuma.sh" | bash
             ;;
         *)
             echo -e "${RED}❌ Unknown package: $1${NC}"
@@ -85,15 +83,16 @@ install_package() {
     esac
 }
 
-# CLI update function
+# Update CLI
 update_cli() {
-    echo -e "${BLUE}📦 Updating 5echo CLI...${NC}"
-    sudo curl -sL "$REPO_BASE/$SCRIPT_NAME" -o "$CLI_PATH"
+    banner
+    echo -e "${YELLOW}📦 Updating 5echo CLI...${NC}"
+    sudo curl -sL "$CLI_URL" -o "$CLI_PATH"
     sudo chmod +x "$CLI_PATH"
-    echo -e "${GREEN}✅ CLI updated!${NC} Try: ${YELLOW}5echo help${NC}"
+    echo -e "${GREEN}✅ CLI updated! Try: 5echo help${NC}"
 }
 
-# Main logic
+# MAIN
 case "$1" in
     install)
         install_package "$2"
