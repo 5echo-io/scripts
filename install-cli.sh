@@ -1,5 +1,4 @@
 #!/bin/bash
-
 set -e
 
 REPO_BASE="https://scripts.5echo.io"
@@ -46,7 +45,24 @@ function update_cli() {
   echo "✅ CLI updated! Try: 5echo help"
 }
 
-# Main logic
+# If script is executed directly (via curl | bash), install CLI
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  echo -e "\n🛠️  5echo CLI Installer\n"
+
+  if [[ -f "$CLI_PATH" ]]; then
+    echo "⚠️  5echo CLI is already installed at $CLI_PATH"
+    echo "ℹ️  Use '5echo update' to update to the latest version."
+    exit 0
+  fi
+
+  echo "📦 Installing 5echo CLI to $CLI_PATH"
+  sudo curl -sL "$CLI_URL" -o "$CLI_PATH"
+  sudo chmod +x "$CLI_PATH"
+  echo "✅ Installed! Try: 5echo help"
+  exit 0
+fi
+
+# If sourced or executed manually, run CLI interface
 case "$1" in
   install)
     install_package "$2"
