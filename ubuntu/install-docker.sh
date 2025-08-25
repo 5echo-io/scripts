@@ -3,11 +3,11 @@ set -e
 
 # ========================================================
 #  5echo.io Docker Installer - Ubuntu/Debian
-#  Version: 1.0.0
+#  Version: 1.1.0
 #  Source: https://5echo.io
 # ========================================================
 
-# Colors for better output
+# Colors
 GREEN="\e[32m"
 YELLOW="\e[33m"
 BLUE="\e[34m"
@@ -21,85 +21,72 @@ banner() {
     echo -e "${BLUE}==============================================${NC}\n"
 }
 
-# Spinner function
-spinner() {
-    local pid=$!
-    local delay=0.1
-    local spin='|/-\'
-    while [ -d /proc/$pid ]; do
-        for i in $(seq 0 3); do
-            echo -ne "\r${BLUE}Starting${NC} ${spin:$i:1}   Press CTRL+C to cancel."
-            sleep $delay
-        done
-    done
-    echo -ne "\r${GREEN}Starting... Done!${NC}          \n"
-}
-
-# Loading function with animated dots
+# Spinner while process runs
 loading() {
     local message="$1"
+    shift
     echo -ne "${BLUE}${message}${NC}"
-    for i in {1..3}; do
-        echo -ne "."
-        sleep 0.4
+    local spin='|/-\\'
+    local i=0
+
+    # Run command in background
+    ("$@" >/dev/null 2>&1) &
+    local pid=$!
+
+    while kill -0 $pid 2>/dev/null; do
+        printf "\r${BLUE}${message}${NC} ${spin:$i:1}"
+        i=$(( (i + 1) % 4 ))
+        sleep 0.2
     done
-    echo ""
+
+    wait $pid
+    local exit_code=$?
+
+    if [ $exit_code -eq 0 ]; then
+        printf "\r${GREEN}${message}... Done!${NC}\n"
+    else
+        printf "\r${RED}${message}... Failed!${NC}\n"
+        exit 1
+    fi
 }
 
 # === Start ===
 clear
 banner
-(sleep 2) & spinner
 
 # Remove old Docker packages
-loading "Removing old Docker packages"
-for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
-    sudo apt-get remove -y $pkg >/dev/null 2>&1 || true
-done
+loading "Removing old Docker packages" bash -c "
+    for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
+        sudo apt-get remove -y \$pkg >/dev/null 2>&1 || true
+    done
+"
 
 # Add Docker repository
-loading "Adding Docker repository"
-sudo apt-get update -qq
-sudo apt-get install -y ca-certificates curl gnupg lsb-release >/dev/null
-sudo install -m 0755 -d /etc/apt/keyrings
-sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-sudo chmod a+r /etc/apt/keyrings/docker.asc
+loading "Adding Docker repository" bash -c "
+    sudo apt-get update -qq &&
+    sudo apt-get install -y ca-certificates curl gnupg lsb-release >/dev/null &&
+    sudo install -m 0755 -d /etc/apt/keyrings &&
+    sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc &&
+    sudo chmod a+r /etc/apt/keyrings/docker.asc &&
+    echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+    https://download.docker.com/linux/ubuntu \
+    \$(. /etc/os-release && echo \"\${UBUNTU_CODENAME:-\$VERSION_CODENAME}\") stable\" | \
+    sudo tee /etc/apt/sources.list.d/docker.list >/dev/null &&
+    sudo apt-get update -qq
+"
 
-# Configure the repository for the correct Ubuntu version
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
-  https://download.docker.com/linux/ubuntu \
-  $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | \
-  sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+# Install Docker
+loading "Installing Docker packages" sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-sudo apt-get update -qq
-
-# Install Docker packages
-loading "Installing Docker packages"
-sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin >/dev/null
-
-# Enable and start Docker service
-loading "Enabling Docker service"
-sudo systemctl enable docker >/dev/null
-sudo systemctl start docker >/dev/null
+# Enable and start Docker
+loading "Enabling Docker service" sudo systemctl enable docker
+loading "Starting Docker service" sudo systemctl start docker
 
 # Test Docker installation
-loading "Testing Docker installation"
-if docker --version >/dev/null 2>&1; then
-    echo -e "${GREEN}Docker installed successfully!${NC}"
-    docker --version
-else
-    echo -e "${RED}Docker installation failed.${NC}"
-    exit 1
-fi
+loading "Testing Docker installation" docker --version
 
-# Run hello-world container to verify installation
-loading "Running Docker hello-world test"
-if sudo docker run hello-world >/dev/null 2>&1; then
-    echo -e "${GREEN}Docker test container ran successfully!${NC}"
-else
-    echo -e "${YELLOW}Docker installed, but hello-world test failed.${NC}"
-fi
+# Run hello-world container
+loading "Running Docker hello-world test" sudo docker run hello-world
 
 # Footer branding
 echo -e "\n${YELLOW}Powered by 5echo.io${NC}"
