@@ -1,61 +1,111 @@
 #!/bin/bash
 set -e
 
-REPO_BASE="https://scripts.5echo.io"
+# ========================================================
+#  5echo CLI - Tools by 5echo.io
+#  Version: 1.1.0
+# ========================================================
 
-# Show CLI help
-function show_help() {
-  echo -e "\n🛠️  5echo CLI - Tools by 5echo.io"
-  echo -e "\nUsage:"
-  echo "  5echo install <package>    Install a supported package"
-  echo "  5echo update               Update this CLI to latest version"
-  echo "  5echo help                 Show this help text"
-  echo ""
-  echo "Supported packages:"
-  echo "  docker         Install Docker CE"
-  echo "  uptime-kuma    Install Uptime Kuma monitoring"
-  echo ""
+# Colors
+GREEN="\e[32m"
+YELLOW="\e[33m"
+BLUE="\e[34m"
+RED="\e[31m"
+NC="\e[0m" # Reset
+
+REPO_BASE="https://raw.githubusercontent.com/5echo-io/scripts/main"
+CLI_PATH="/usr/local/bin/5echo"
+SCRIPT_NAME="5echo"
+
+# Minimal banner
+banner() {
+    echo -e "${BLUE}==============================================${NC}"
+    echo -e "${BLUE}               5echo CLI Tool                ${NC}"
+    echo -e "${BLUE}==============================================${NC}"
+    echo -e "${YELLOW} Run powerful tools with: 5echo install ... ${NC}\n"
+}
+
+# Spinner loader
+loading() {
+    local message="$1"
+    shift
+    echo -ne "${BLUE}${message}${NC}"
+    local spin='|/-\\'
+    local i=0
+
+    ("$@" >/dev/null 2>&1) &
+    local pid=$!
+
+    while kill -0 $pid 2>/dev/null; do
+        printf "\r${BLUE}${message}${NC} ${spin:$i:1}"
+        i=$(( (i + 1) % 4 ))
+        sleep 0.1
+    done
+
+    wait $pid
+    local exit_code=$?
+
+    if [ $exit_code -eq 0 ]; then
+        printf "\r${GREEN}${message}... Done!${NC}\n"
+    else
+        printf "\r${RED}${message}... Failed!${NC}\n"
+        exit 1
+    fi
+}
+
+# Show help
+show_help() {
+    banner
+    echo -e "${BLUE}Usage:${NC}"
+    echo -e "  5echo install <package>    Install a supported package"
+    echo -e "  5echo update               Update this CLI to latest version"
+    echo -e "  5echo help                 Show this help text"
+    echo ""
+    echo -e "${BLUE}Supported packages:${NC}"
+    echo -e "  docker         Install Docker CE"
+    echo -e "  uptime-kuma    Install Uptime Kuma monitoring"
+    echo ""
+    echo -e "${YELLOW}Powered by 5echo.io${NC}"
+    echo -e "${BLUE}2025 © 5echo.io${NC}"
 }
 
 # Install packages
-function install_package() {
-  case "$1" in
-    docker)
-      echo "🔧 Installing Docker..."
-      curl -sL "$REPO_BASE/install-docker.sh" | bash
-      ;;
-    uptime-kuma)
-      echo "🔧 Installing Uptime Kuma..."
-      curl -sL "$REPO_BASE/install-uptime-kuma.sh" | bash
-      ;;
-    *)
-      echo "❌ Unknown package: $1"
-      show_help
-      ;;
-  esac
+install_package() {
+    case "$1" in
+        docker)
+            loading "Installing Docker" bash -c "curl -sL $REPO_BASE/install-docker.sh | bash"
+            ;;
+        uptime-kuma)
+            loading "Installing Uptime Kuma" bash -c "curl -sL $REPO_BASE/install-uptime-kuma.sh | bash"
+            ;;
+        *)
+            echo -e "${RED}❌ Unknown package: $1${NC}"
+            show_help
+            ;;
+    esac
 }
 
-# Update CLI
-function update_cli() {
-  echo "📦 Updating 5echo CLI..."
-  sudo curl -sL "$REPO_BASE/5echo" -o /usr/local/bin/5echo
-  sudo chmod +x /usr/local/bin/5echo
-  echo "✅ CLI updated!"
+# CLI update function
+update_cli() {
+    echo -e "${BLUE}📦 Updating 5echo CLI...${NC}"
+    sudo curl -sL "$REPO_BASE/$SCRIPT_NAME" -o "$CLI_PATH"
+    sudo chmod +x "$CLI_PATH"
+    echo -e "${GREEN}✅ CLI updated!${NC} Try: ${YELLOW}5echo help${NC}"
 }
 
 # Main logic
 case "$1" in
-  install)
-    install_package "$2"
-    ;;
-  update)
-    update_cli
-    ;;
-  help|--help|-h|"")
-    show_help
-    ;;
-  *)
-    echo "❌ Unknown command: $1"
-    show_help
-    ;;
+    install)
+        install_package "$2"
+        ;;
+    update)
+        update_cli
+        ;;
+    help|--help|-h|"")
+        show_help
+        ;;
+    *)
+        echo -e "${RED}❌ Unknown command: $1${NC}"
+        show_help
+        ;;
 esac
