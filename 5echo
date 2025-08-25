@@ -3,7 +3,7 @@ set -e
 
 # ============================================
 #  5echo CLI - Tools by 5echo.io
-#  Version: 1.1.0
+#  Version: 1.1.1
 #  https://5echo.io
 # ============================================
 
@@ -51,7 +51,7 @@ loading() {
     fi
 }
 
-# Help text
+# Show help
 show_help() {
     banner
     echo -e "\nUsage:"
@@ -63,9 +63,11 @@ show_help() {
     echo "  docker         Install Docker CE"
     echo "  uptime-kuma    Install Uptime Kuma monitoring"
     echo ""
+    echo -e "${YELLOW}Powered by 5echo.io${NC}"
+    echo -e "${BLUE}2025 © 5echo.io${NC}"
 }
 
-# Package installer
+# Install packages
 install_package() {
     case "$1" in
         docker)
@@ -83,7 +85,7 @@ install_package() {
     esac
 }
 
-# Update CLI
+# CLI updater
 update_cli() {
     banner
     echo -e "${YELLOW}📦 Updating 5echo CLI...${NC}"
@@ -92,7 +94,7 @@ update_cli() {
     echo -e "${GREEN}✅ CLI updated! Try: 5echo help${NC}"
 }
 
-# MAIN
+# === Main logic ===
 case "$1" in
     install)
         install_package "$2"
