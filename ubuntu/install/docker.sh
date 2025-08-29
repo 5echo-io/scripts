@@ -3,7 +3,7 @@ set -e
 
 # ========================================================
 #  5echo.io Docker Installer - Ubuntu/Debian
-#  Version: 1.1.1
+#  Version: 1.2.0
 #  Source: https://5echo.io
 # ========================================================
 
@@ -29,7 +29,6 @@ loading() {
     local spin='|/-\\'
     local i=0
 
-    # Run command in background
     ("$@" >/dev/null 2>&1) &
     local pid=$!
 
@@ -61,14 +60,77 @@ loading "Checking curl (and installing if missing)" bash -c "
     fi
 "
 
-# Remove old Docker packages
+# Check Docker status and decide path (absent | up_to_date | needs_update)
+loading "Checking Docker status" bash -c '
+    STATUS_FILE="/tmp/docker_status_5echo"
+    : > "$STATUS_FILE"
+
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "absent" > "$STATUS_FILE"
+        exit 0
+    fi
+
+    # Ensure Docker repo exists so candidate version is accurate
+    sudo install -m 0755 -d /etc/apt/keyrings
+    if [ ! -f /etc/apt/keyrings/docker.asc ]; then
+        # Try to detect Ubuntu/Debian codename
+        . /etc/os-release
+        CODENAME="${UBUNTU_CODENAME:-$VERSION_CODENAME}"
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /tmp/docker.asc 2>/dev/null || true
+        if [ -s /tmp/docker.asc ]; then
+            sudo mv /tmp/docker.asc /etc/apt/keyrings/docker.asc
+            sudo chmod a+r /etc/apt/keyrings/docker.asc
+        fi
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${CODENAME} stable" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+    fi
+
+    sudo apt-get update -qq || true
+
+    # Which package provides docker?
+    if dpkg -s docker-ce >/dev/null 2>&1; then
+        PKG=docker-ce
+    elif dpkg -s docker.io >/dev/null 2>&1; then
+        PKG=docker.io
+    else
+        # Unknown origin (snap/other), treat as needs_update/migrate
+        echo "needs_update" > "$STATUS_FILE"
+        exit 0
+    fi
+
+    # If docker-ce is installed, compare installed vs candidate
+    if [ "$PKG" = "docker-ce" ]; then
+        INSTALLED=$(dpkg-query -W -f='"'${Version}'"' docker-ce 2>/dev/null | tr -d '"')
+        CANDIDATE=$(apt-cache policy docker-ce | awk "/Candidate:/ {print \$2}")
+        if [ -n "$CANDIDATE" ] && [ "$CANDIDATE" != "(none)" ] && [ "$INSTALLED" = "$CANDIDATE" ]; then
+            echo "up_to_date" > "$STATUS_FILE"
+        else
+            echo "needs_update" > "$STATUS_FILE"
+        fi
+        exit 0
+    fi
+
+    # docker.io installed → consider migrating to docker-ce (newer)
+    if [ "$PKG" = "docker.io" ]; then
+        echo "needs_update" > "$STATUS_FILE"
+        exit 0
+    fi
+'
+
+DOCKER_STATUS="$(cat /tmp/docker_status_5echo 2>/dev/null || echo absent)"
+
+if [ "$DOCKER_STATUS" = "up_to_date" ]; then
+    echo -e "${GREEN}Docker is already at the latest version. Exiting.${NC}"
+    exit 0
+fi
+
+# Remove old Docker packages (only if we install/upgrade)
 loading "Removing old Docker packages" bash -c "
     for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
         sudo apt-get remove -y \$pkg >/dev/null 2>&1 || true
     done
 "
 
-# Add Docker repository
+# Add/refresh Docker repository
 loading "Adding Docker repository" bash -c "
     sudo apt-get update -qq &&
     sudo apt-get install -y ca-certificates curl gnupg lsb-release >/dev/null &&
@@ -82,8 +144,12 @@ loading "Adding Docker repository" bash -c "
     sudo apt-get update -qq
 "
 
-# Install Docker
-loading "Installing Docker packages" sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+if [ "$DOCKER_STATUS" = "needs_update" ]; then
+    loading "Upgrading Docker to latest" sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+else
+    # DOCKER_STATUS=absent → fresh install
+    loading "Installing Docker packages" sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+fi
 
 # Enable and start Docker
 loading "Enabling Docker service" sudo systemctl enable docker
