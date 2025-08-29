@@ -3,7 +3,7 @@ set -e
 
 # ========================================================
 #  5echo.io Docker Installer - Ubuntu/Debian
-#  Version: 1.1.0
+#  Version: 1.1.1
 #  Source: https://5echo.io
 # ========================================================
 
@@ -54,6 +54,13 @@ loading() {
 clear
 banner
 
+# Ensure curl is installed (needed later for repo key fetch)
+loading "Checking curl (and installing if missing)" bash -c "
+    if ! command -v curl >/dev/null 2>&1; then
+        sudo apt-get update -qq && sudo apt-get install -y curl
+    fi
+"
+
 # Remove old Docker packages
 loading "Removing old Docker packages" bash -c "
     for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
@@ -86,7 +93,7 @@ loading "Starting Docker service" sudo systemctl start docker
 loading "Testing Docker installation" docker --version
 
 # Run hello-world container
-loading "Running Docker hello-world test" sudo docker run hello-world
+loading "Running Docker hello-world test" sudo docker run --rm hello-world
 
 # Footer branding
 echo -e "\n${YELLOW}Powered by 5echo.io${NC}"
