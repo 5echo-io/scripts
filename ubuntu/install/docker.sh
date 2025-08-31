@@ -3,15 +3,14 @@ set -e
 
 # ========================================================
 #  5echo.io Docker Installer - Ubuntu/Debian
-#  Version: 1.9.0
+#  Version: 1.9.1
 #  Source: https://5echo.io
 # ========================================================
 
 # ---- Config (env-overridable) --------------------------
-ADD_USER_TO_DOCKER_GROUP="${ADD_USER_TO_DOCKER_GROUP:-1}"  # 1=yes, 0=no
-REINSTALL="${REINSTALL:-0}"                                # 1=force reinstall without prompt
-PURGE_DATA="${PURGE_DATA:-0}"                              # 1=purge /var/lib/docker and /etc/docker during reinstall
-SKIP_HELLO="${SKIP_HELLO:-0}"                              # 1=skip hello-world test
+REINSTALL="${REINSTALL:-0}"     # 1=force reinstall without prompt
+PURGE_DATA="${PURGE_DATA:-0}"   # 1=purge /var/lib/docker and /etc/docker during reinstall
+SKIP_HELLO="${SKIP_HELLO:-0}"   # 1=skip hello-world test
 # --------------------------------------------------------
 
 # Colors
@@ -43,8 +42,18 @@ footer() {
 }
 trap footer EXIT
 
-# --- Step numbering & spinner with duration --------------
+# --- Step numbering & spinner with live duration (right-aligned) ---
 STEP_INDEX=0
+
+term_cols() {
+  local c
+  c="$(tput cols 2>/dev/null || true)"
+  if [ -z "$c" ]; then
+    # Fallback via stty, else default
+    c="$(stty size 2>/dev/null | awk '{print $2}')"
+  fi
+  echo "${c:-0}"
+}
 
 run_step() {
   local title="$1"; shift
@@ -60,14 +69,36 @@ run_step() {
 
   local spin='|/-\'; local i=0
   while kill -0 "$pid" 2>/dev/null; do
+    # elapsed
+    local now_ms elapsed_ms elapsed_s dur_text cols colpos
+    now_ms="$(date +%s%3N 2>/dev/null || { echo $(( $(date +%s) * 1000 )); })"
+    elapsed_ms=$(( now_ms - start_ms ))
+    elapsed_s="$(awk "BEGIN { printf \"%.2f\", ${elapsed_ms}/1000 }")"
+    dur_text="${elapsed_s}s"
+
+    # left side (no duration yet)
     printf "\r\033[K${BLUE}[%d] %s${NC}  %s" "$STEP_INDEX" "$title" "${spin:$i:1}"
+
+    # place duration at the right edge if we know terminal width
+    cols="$(term_cols)"
+    if [ "$cols" -gt 0 ]; then
+      colpos=$(( cols - ${#dur_text} ))
+      if [ "$colpos" -gt 1 ]; then
+        printf "\033[%dG%s" "$colpos" "$dur_text"
+      else
+        printf "  %s" "$dur_text"
+      fi
+    else
+      printf "  %s" "$dur_text"
+    fi
+
     i=$(( (i + 1) % 4 ))
     sleep 0.15
   done
 
   wait "$pid"; local rc=$?
 
-  # time end (ms) and duration
+  # final duration
   local end_ms elapsed_ms elapsed_s
   end_ms="$(date +%s%3N 2>/dev/null || { echo $(( $(date +%s) * 1000 )); })"
   elapsed_ms=$(( end_ms - start_ms ))
@@ -76,10 +107,10 @@ run_step() {
   printf "\r\033[K"  # clear spinner line
 
   if [ $rc -eq 0 ]; then
-    echo -e "${GREEN}[$STEP_INDEX] ${title}... Done! (${elapsed_s}s)${NC}"
+    echo -e "${GREEN}[${STEP_INDEX}] ${title}... Done! (${elapsed_s}s)${NC}"
     rm -f "$logf"
   else
-    echo -e "${RED}[$STEP_INDEX] ${title}... Failed! (${elapsed_s}s)${NC}"
+    echo -e "${RED}[${STEP_INDEX}] ${title}... Failed! (${elapsed_s}s)${NC}"
     echo -e "${YELLOW}Last 80 log lines:${NC}"
     tail -n 80 "$logf" || true
     echo -e "${YELLOW}Full log:${NC} $logf"
@@ -187,7 +218,7 @@ run_step "Checking Docker status" bash "$CHECK_SCRIPT"
 SUMMARY_INSTALLED_BEFORE="${installed:-}"
 SUMMARY_CANDIDATE="${candidate:-}"
 
-# 2b) If Docker exists: ask for reinstall (with optional data purge)
+# 2b) If Docker exists: offer reinstall (optional data purge)
 if [ "${status:-absent}" != "absent" ]; then
   if [ "$REINSTALL" -eq 1 ]; then
     REINSTALL_DECISION=1
@@ -291,16 +322,7 @@ run_step "Starting Docker service" sudo systemctl start docker
 # 8) Test docker binary
 run_step "Testing Docker installation" docker --version
 
-# 9) Add user to docker group (optional)
-if [ "$ADD_USER_TO_DOCKER_GROUP" -eq 1 ]; then
-  CURRENT_USER="${SUDO_USER:-$USER}"
-  if [ "$CURRENT_USER" != "root" ] && ! id -nG "$CURRENT_USER" | grep -qw docker; then
-    run_step "Adding user '$CURRENT_USER' to docker group" sudo usermod -aG docker "$CURRENT_USER"
-    echo -e "${YELLOW}Note:${NC} log out/in (or run 'newgrp docker') to use docker without sudo."
-  fi
-fi
-
-# 10) Hello-world test (optional)
+# 9) Hello-world test (optional)
 if [ "$SKIP_HELLO" -ne 1 ]; then
   run_step "Running Docker hello-world test" sudo docker run --rm hello-world
 fi
