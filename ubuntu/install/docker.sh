@@ -3,16 +3,19 @@ set -e
 
 # ========================================================
 #  5echo.io Docker Installer - Ubuntu/Debian
-#  Version: 1.6.0
+#  Version: 1.9.0
 #  Source: https://5echo.io
 # ========================================================
 
+# ---- Config (env-overridable) --------------------------
+ADD_USER_TO_DOCKER_GROUP="${ADD_USER_TO_DOCKER_GROUP:-1}"  # 1=yes, 0=no
+REINSTALL="${REINSTALL:-0}"                                # 1=force reinstall without prompt
+PURGE_DATA="${PURGE_DATA:-0}"                              # 1=purge /var/lib/docker and /etc/docker during reinstall
+SKIP_HELLO="${SKIP_HELLO:-0}"                              # 1=skip hello-world test
+# --------------------------------------------------------
+
 # Colors
-GREEN="\e[32m"
-YELLOW="\e[33m"
-BLUE="\e[34m"
-RED="\e[31m"
-NC="\e[0m" # Reset
+GREEN="\e[32m"; YELLOW="\e[33m"; BLUE="\e[34m"; RED="\e[31m"; NC="\e[0m"
 
 banner() {
   echo -e "${BLUE}==============================================${NC}"
@@ -20,174 +23,263 @@ banner() {
   echo -e "${BLUE}==============================================${NC}\n"
 }
 
+# Summary state
+ACTION="unknown"
+SUMMARY_INSTALLED_BEFORE=""
+SUMMARY_CANDIDATE=""
+SUMMARY_VERSION_AFTER=""
+
 footer() {
+  echo -e "\n${YELLOW}Summary:${NC}"
+  echo -e "  Action: ${BLUE}${ACTION}${NC}"
+  [ -n "$SUMMARY_INSTALLED_BEFORE" ] && echo -e "  Before: ${SUMMARY_INSTALLED_BEFORE}"
+  [ -n "$SUMMARY_CANDIDATE" ]       && echo -e "  Candidate: ${SUMMARY_CANDIDATE}"
+  if command -v docker >/dev/null 2>&1; then
+    SUMMARY_VERSION_AFTER="$(docker --version 2>/dev/null | sed 's/^/  After: /')"
+    [ -n "$SUMMARY_VERSION_AFTER" ] && echo -e "${SUMMARY_VERSION_AFTER}"
+  fi
   echo -e "\n${YELLOW}Powered by 5echo.io${NC}"
   echo -e "${BLUE}2025 © 5echo.io${NC}\n"
 }
 trap footer EXIT
 
-# --- Compact per-step progress bar (ASCII, inline, only while running) ---
+# --- Step numbering & spinner with duration --------------
+STEP_INDEX=0
+
 run_step() {
   local title="$1"; shift
+  STEP_INDEX=$((STEP_INDEX + 1))
   local logf; logf="$(mktemp /tmp/5echo-step.XXXXXX.log)"
 
-  # Start command in background; redirect all output to log
+  # time start (ms)
+  local start_ms
+  start_ms="$(date +%s%3N 2>/dev/null || { echo $(( $(date +%s) * 1000 )); })"
+
   ( "$@" >"$logf" 2>&1 ) &
   local pid=$!
 
-  # Simple “marquee” bar
-  local width=28 i=0 dir=1
+  local spin='|/-\'; local i=0
   while kill -0 "$pid" 2>/dev/null; do
-    local bar=""
-    for ((c=0; c<width; c++)); do
-      if [ $c -eq $i ]; then bar+="#"; else bar+="-"; fi
-    done
-    # Print inline bar; clear line first to avoid remnants
-    printf "\r\033[K${BLUE}%s${NC}  [%s]" "$title" "$bar"
-    i=$((i+dir))
-    if [ $i -ge $((width-1)) ] || [ $i -le 0 ]; then dir=$(( -dir )); fi
-    sleep 0.08
+    printf "\r\033[K${BLUE}[%d] %s${NC}  %s" "$STEP_INDEX" "$title" "${spin:$i:1}"
+    i=$(( (i + 1) % 4 ))
+    sleep 0.15
   done
 
-  # Wait for command to end and capture exit
   wait "$pid"; local rc=$?
 
+  # time end (ms) and duration
+  local end_ms elapsed_ms elapsed_s
+  end_ms="$(date +%s%3N 2>/dev/null || { echo $(( $(date +%s) * 1000 )); })"
+  elapsed_ms=$(( end_ms - start_ms ))
+  elapsed_s="$(awk "BEGIN { printf \"%.2f\", ${elapsed_ms}/1000 }")"
+
+  printf "\r\033[K"  # clear spinner line
+
   if [ $rc -eq 0 ]; then
-    # Clear the line and print clean “Done!”
-    printf "\r\033[K${GREEN}%s... Done!${NC}\n" "$title"
+    echo -e "${GREEN}[$STEP_INDEX] ${title}... Done! (${elapsed_s}s)${NC}"
     rm -f "$logf"
   else
-    printf "\r\033[K${RED}%s... Failed!${NC}\n" "$title"
-    echo -e "${YELLOW}Last 50 log lines:${NC}"
-    tail -n 50 "$logf" || true
-    rm -f "$logf"
+    echo -e "${RED}[$STEP_INDEX] ${title}... Failed! (${elapsed_s}s)${NC}"
+    echo -e "${YELLOW}Last 80 log lines:${NC}"
+    tail -n 80 "$logf" || true
+    echo -e "${YELLOW}Full log:${NC} $logf"
     exit 1
   fi
+}
+
+ask_yes_no() {
+  # usage: ask_yes_no "Question" [Y|N]  (default is second arg, default=N if omitted)
+  local q="$1"; local def="${2:-N}"; local ans; local prompt="[y/N]"
+  [ "$def" = "Y" ] && prompt="[Y/n]"
+  read -r -p "$q $prompt " ans
+  case "$ans" in
+    y|Y|yes|YES) return 0 ;;
+    n|N|no|NO)   return 1 ;;
+    *)           [ "$def" = "Y" ] && return 0 || return 1 ;;
+  esac
 }
 
 # === Start ===
 clear
 banner
 
-# 1) Ensure curl is installed
-run_step "Checking curl (and installing if missing)" bash -c '
+# 1) Ensure curl
+run_step "Checking curl (and installing if missing)" bash -lc '
   if ! command -v curl >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-    sudo apt-get -qq update
-    sudo apt-get -y -qq install curl
+    sudo -E apt-get -qq update
+    sudo -E apt-get -y -qq install curl
   fi
 '
 
-# 2) Prepare helper to check Docker status cleanly (no quoting pitfalls)
-STATUS_FILE="/tmp/docker_status_5echo"
+# 2) Check Docker status & candidate (quiet)
+DOCKER_ENV_FILE="/tmp/docker_check_5echo.env"
 CHECK_SCRIPT="$(mktemp /tmp/5echo-check-docker.XXXXXX.sh)"
 
 cat <<'EOS' > "$CHECK_SCRIPT"
 #!/bin/bash
 set -e
 
-STATUS_FILE="/tmp/docker_status_5echo"
-: > "$STATUS_FILE"
+OUT="/tmp/docker_check_5echo.env"
+{
+  echo "status=absent"
+  echo "installed="
+  echo "candidate="
+} > "$OUT"
 
-# If docker is not installed, mark absent
 if ! command -v docker >/dev/null 2>&1; then
-  echo "absent" > "$STATUS_FILE"
   exit 0
 fi
 
-# Ensure Docker repo exists so candidate version is accurate
 sudo install -m 0755 -d /etc/apt/keyrings
 . /etc/os-release
 DIST="${ID}"
 CODENAME="${UBUNTU_CODENAME:-$VERSION_CODENAME}"
 
-if [ ! -f /etc/apt/keyrings/docker.asc ]; then
+[ -f /etc/apt/keyrings/docker.asc ] || {
   curl -fsSL "https://download.docker.com/linux/${DIST}/gpg" -o /tmp/docker.asc 2>/dev/null || true
   if [ -s /tmp/docker.asc ]; then
     sudo mv /tmp/docker.asc /etc/apt/keyrings/docker.asc
     sudo chmod a+r /etc/apt/keyrings/docker.asc
   fi
-fi
+}
 
-if [ ! -f /etc/apt/sources.list.d/docker.list ]; then
+[ -f /etc/apt/sources.list.d/docker.list ] || {
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${DIST} ${CODENAME} stable" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
-fi
+}
 
 sudo apt-get -qq update || true
 
-# Determine package origin
+INST=""
+CAND=""
 if dpkg -s docker-ce >/dev/null 2>&1; then
-  PKG=docker-ce
-elif dpkg -s docker.io >/dev/null 2>&1; then
-  PKG=docker.io
-else
-  echo "needs_update" > "$STATUS_FILE"
-  exit 0
-fi
-
-if [ "$PKG" = "docker-ce" ]; then
-  INSTALLED=$(dpkg-query -W -f='${Version}' docker-ce 2>/dev/null || true)
-  CANDIDATE=$(apt-cache policy docker-ce | awk "/Candidate:/ {print \$2}")
-  if [ -n "$CANDIDATE" ] && [ "$CANDIDATE" != "(none)" ] && [ "$INSTALLED" = "$CANDIDATE" ]; then
-    echo "up_to_date" > "$STATUS_FILE"
+  INST="$(dpkg-query -W -f='${Version}' docker-ce 2>/dev/null || true)"
+  CAND="$(apt-cache policy docker-ce | awk "/Candidate:/ {print \$2}")"
+  if [ -n "$CAND" ] && [ "$CAND" != "(none)" ] && [ "$INST" = "$CAND" ]; then
+    echo "status=up_to_date" > "$OUT"
   else
-    echo "needs_update" > "$STATUS_FILE"
+    echo "status=needs_update" > "$OUT"
   fi
+  echo "installed=$INST" >> "$OUT"
+  echo "candidate=$CAND"  >> "$OUT"
   exit 0
 fi
 
-# docker.io installed -> treat as needs_update/migrate to docker-ce
-echo "needs_update" > "$STATUS_FILE"
+if dpkg -s docker.io >/dev/null 2>&1; then
+  INST="$(dpkg-query -W -f='${Version}' docker.io 2>/dev/null || true)"
+  CAND="$(apt-cache policy docker-ce | awk "/Candidate:/ {print \$2}")"
+  echo "status=needs_update" > "$OUT"
+  echo "installed=$INST" >> "$OUT"
+  echo "candidate=$CAND"  >> "$OUT"
+  exit 0
+fi
+
+VER="$(docker --version 2>/dev/null | awk "{print \$3}" | tr -d , || true)"
+echo "status=needs_update" > "$OUT"
+echo "installed=$VER" >> "$OUT"
+echo "candidate="     >> "$OUT"
 EOS
 chmod +x "$CHECK_SCRIPT"
 
 run_step "Checking Docker status" bash "$CHECK_SCRIPT"
-DOCKER_STATUS="$(cat "$STATUS_FILE" 2>/dev/null || echo absent)"
+# shellcheck disable=SC1090
+. "$DOCKER_ENV_FILE" || true
+SUMMARY_INSTALLED_BEFORE="${installed:-}"
+SUMMARY_CANDIDATE="${candidate:-}"
 
-if [ "$DOCKER_STATUS" = "up_to_date" ]; then
-  echo -e "${GREEN}Docker is already at the latest version. Exiting.${NC}"
-  rm -f "$CHECK_SCRIPT" "$STATUS_FILE" 2>/dev/null || true
-  exit 0
+# 2b) If Docker exists: ask for reinstall (with optional data purge)
+if [ "${status:-absent}" != "absent" ]; then
+  if [ "$REINSTALL" -eq 1 ]; then
+    REINSTALL_DECISION=1
+  else
+    echo -e "${YELLOW}Docker detected.${NC} Installed: ${installed:-unknown}  Candidate: ${candidate:-unknown}"
+    if ask_yes_no "Reinstall Docker from scratch?" "N"; then
+      REINSTALL_DECISION=1
+    else
+      REINSTALL_DECISION=0
+    fi
+  fi
+
+  if [ "$REINSTALL_DECISION" -eq 1 ]; then
+    ACTION="reinstall"
+    if [ "$PURGE_DATA" -eq 1 ]; then
+      PURGE_DECISION=1
+    else
+      if ask_yes_no "Also purge Docker data (/var/lib/docker and /etc/docker)? This removes images/containers." "N"; then
+        PURGE_DECISION=1
+      else
+        PURGE_DECISION=0
+      fi
+    fi
+  else
+    if [ "${status}" = "up_to_date" ]; then
+      ACTION="noop"
+      echo -e "${GREEN}Docker is already at the latest version. Exiting.${NC}"
+      rm -f "$CHECK_SCRIPT" "$DOCKER_ENV_FILE" 2>/dev/null || true
+      exit 0
+    fi
+  fi
 fi
 
-# 3) Remove old/conflicting packages quietly
-run_step "Removing old Docker packages" bash -c '
-  export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-  for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
-    sudo apt-get -y -qq remove "$pkg" >/dev/null 2>&1 || true
-  done
-'
+# 3) Reinstall branch: stop services, remove pkgs, optional data purge
+if [ "${ACTION}" = "reinstall" ]; then
+  run_step "Stopping Docker services" bash -lc '
+    sudo systemctl stop docker || true
+    sudo systemctl stop containerd || true
+  '
+  run_step "Removing Docker packages" bash -lc '
+    export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
+    for pkg in docker-ce docker-ce-cli docker-ce-rootless-extras docker-compose-plugin \
+               docker-buildx-plugin docker.io docker-doc docker-compose docker-compose-v2 \
+               podman-docker containerd runc; do
+      sudo -E apt-get -y -qq remove "$pkg" >/dev/null 2>&1 || true
+      sudo -E apt-get -y -qq purge  "$pkg" >/dev/null 2>&1 || true
+    done
+  '
+  if [ "${PURGE_DECISION:-0}" -eq 1 ]; then
+    run_step "Purging Docker data (/var/lib/docker, /etc/docker)" bash -lc '
+      sudo rm -rf /var/lib/docker /etc/docker
+    '
+  fi
+fi
 
-# 4) Add/refresh Docker repository (ID + CODENAME aware)
-run_step "Adding Docker repository" bash -c '
+# Decide ACTION if still unknown
+if [ "$ACTION" = "unknown" ]; then
+  case "${status:-absent}" in
+    absent)       ACTION="install" ;;
+    needs_update) ACTION="upgrade" ;;
+    up_to_date)   ACTION="noop" ;;  # handled above
+    *)            ACTION="install" ;;
+  esac
+fi
+
+# 4) Add/refresh Docker repository
+run_step "Adding Docker repository" bash -lc '
   export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-  sudo apt-get -qq update
-  sudo apt-get -y -qq install ca-certificates curl gnupg lsb-release >/dev/null
+  sudo -E apt-get -qq update
+  sudo -E apt-get -y -qq install ca-certificates curl gnupg lsb-release >/dev/null
   sudo install -m 0755 -d /etc/apt/keyrings
   . /etc/os-release
-  DIST="${ID}"
-  CODENAME="${UBUNTU_CODENAME:-$VERSION_CODENAME}"
-  sudo curl -fsSL "https://download.docker.com/linux/${DIST}/gpg" -o /etc/apt/keyrings/docker.asc
+  DIST="${ID}"; CODENAME="${UBUNTU_CODENAME:-$VERSION_CODENAME}"
+  curl -fsSL "https://download.docker.com/linux/${DIST}/gpg" | sudo tee /etc/apt/keyrings/docker.asc >/dev/null
   sudo chmod a+r /etc/apt/keyrings/docker.asc
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${DIST} ${CODENAME} stable" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
-  sudo apt-get -qq update
+  sudo -E apt-get -qq update
 '
 
-# 5) Install/Upgrade Docker (silent; logs if error)
-APT_COMMON_OPTS=(-y -qq
-  -o Dpkg::Options::="--force-confdef"
-  -o Dpkg::Options::="--force-confold"
-)
-if [ "$DOCKER_STATUS" = "needs_update" ]; then
-  run_step "Upgrading Docker to latest" bash -c '
-    export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-    sudo apt-get "${APT_COMMON_OPTS[@]}" install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-  ' _
+# 5) Install/Upgrade Docker
+if [ "$ACTION" = "upgrade" ]; then
+  run_step "Upgrading Docker to latest" env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+    sudo -E apt-get -y \
+      -o Dpkg::Options::=--force-confdef \
+      -o Dpkg::Options::=--force-confold \
+      install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 else
-  run_step "Installing Docker packages" bash -c '
-    export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-    sudo apt-get "${APT_COMMON_OPTS[@]}" install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-  ' _
+  run_step "Installing Docker packages" env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+    sudo -E apt-get -y \
+      -o Dpkg::Options::=--force-confdef \
+      -o Dpkg::Options::=--force-confold \
+      install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 fi
 
 # 6) Enable service
@@ -199,8 +291,19 @@ run_step "Starting Docker service" sudo systemctl start docker
 # 8) Test docker binary
 run_step "Testing Docker installation" docker --version
 
-# 9) Hello-world test (silent)
-run_step "Running Docker hello-world test" sudo docker run --rm hello-world
+# 9) Add user to docker group (optional)
+if [ "$ADD_USER_TO_DOCKER_GROUP" -eq 1 ]; then
+  CURRENT_USER="${SUDO_USER:-$USER}"
+  if [ "$CURRENT_USER" != "root" ] && ! id -nG "$CURRENT_USER" | grep -qw docker; then
+    run_step "Adding user '$CURRENT_USER' to docker group" sudo usermod -aG docker "$CURRENT_USER"
+    echo -e "${YELLOW}Note:${NC} log out/in (or run 'newgrp docker') to use docker without sudo."
+  fi
+fi
+
+# 10) Hello-world test (optional)
+if [ "$SKIP_HELLO" -ne 1 ]; then
+  run_step "Running Docker hello-world test" sudo docker run --rm hello-world
+fi
 
 # Cleanup
-rm -f "$CHECK_SCRIPT" "$STATUS_FILE" 2>/dev/null || true
+rm -f "$CHECK_SCRIPT" "$DOCKER_ENV_FILE" 2>/dev/null || true
