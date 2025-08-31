@@ -3,7 +3,7 @@ set -e
 
 # ========================================================
 #  5echo.io Docker Installer - Ubuntu/Debian
-#  Version: 1.2.1
+#  Version: 1.2.2
 #  Source: https://5echo.io
 # ========================================================
 
@@ -20,6 +20,14 @@ banner() {
     echo -e "${BLUE}            5echo.io - Docker Installer${NC}"
     echo -e "${BLUE}==============================================${NC}\n"
 }
+
+footer() {
+    echo -e "\n${YELLOW}Powered by 5echo.io${NC}"
+    echo -e "${BLUE}2025 © 5echo.io${NC}\n"
+}
+
+# Always show footer on exit (success or failure or early exit)
+trap footer EXIT
 
 # Spinner while process runs
 loading() {
@@ -131,7 +139,7 @@ DOCKER_STATUS="$(cat "$STATUS_FILE" 2>/dev/null || echo absent)"
 
 if [ "$DOCKER_STATUS" = "up_to_date" ]; then
     echo -e "${GREEN}Docker is already at the latest version. Exiting.${NC}"
-    rm -f "$CHECK_SCRIPT"
+    rm -f "$CHECK_SCRIPT" "$STATUS_FILE" 2>/dev/null || true
     exit 0
 fi
 
@@ -175,7 +183,3 @@ loading "Running Docker hello-world test" sudo docker run --rm hello-world
 
 # Cleanup helper
 rm -f "$CHECK_SCRIPT" "$STATUS_FILE" 2>/dev/null || true
-
-# Footer branding
-echo -e "\n${YELLOW}Powered by 5echo.io${NC}"
-echo -e "${BLUE}2025 © 5echo.io${NC}\n"
