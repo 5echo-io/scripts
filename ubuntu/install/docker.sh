@@ -3,7 +3,7 @@ set -e
 
 # ========================================================
 #  5echo.io Docker Installer - Ubuntu/Debian
-#  Version: 1.9.4
+#  Version: 1.9.5
 #  Source: https://5echo.io
 # ========================================================
 
@@ -17,7 +17,7 @@ SKIP_HELLO="${SKIP_HELLO:-0}"   # 1=skip hello-world test
 GREEN="\e[32m"; YELLOW="\e[33m"; BLUE="\e[34m"; RED="\e[31m"; NC="\e[0m"
 
 # --- Banner (informative header, aligned) ---------------
-SCRIPT_VERSION="1.9.4"
+SCRIPT_VERSION="1.9.5"
 
 banner() {
   # Gather context quietly
@@ -109,9 +109,22 @@ run_step() {
 
 ask_yes_no() {
   # usage: ask_yes_no "Question" [Y|N]  (default is second arg, default=N if omitted)
-  local q="$1"; local def="${2:-N}"; local ans; local prompt="[y/N]"
+  local q="$1"; local def="${2:-N}"; local prompt="[y/N]"
   [ "$def" = "Y" ] && prompt="[Y/n]"
-  read -r -p "$q $prompt " ans
+  local ans=""
+
+  # Prefer reading from the controlling terminal to ensure prompt is shown
+  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    printf "%s %s " "$q" "$prompt" > /dev/tty
+    IFS= read -r ans < /dev/tty || true
+  elif [ -t 0 ]; then
+    # fallback to stdin if it's a TTY
+    read -r -p "$q $prompt " ans || true
+  else
+    # non-interactive: keep ans empty to use default below
+    :
+  fi
+
   case "$ans" in
     y|Y|yes|YES) return 0 ;;
     n|N|no|NO)   return 1 ;;
