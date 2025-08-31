@@ -3,7 +3,7 @@ set -e
 
 # ========================================================
 #  5echo.io Docker Installer - Ubuntu/Debian
-#  Version: 1.9.2
+#  Version: 1.9.3
 #  Source: https://5echo.io
 # ========================================================
 
@@ -16,10 +16,42 @@ SKIP_HELLO="${SKIP_HELLO:-0}"   # 1=skip hello-world test
 # Colors
 GREEN="\e[32m"; YELLOW="\e[33m"; BLUE="\e[34m"; RED="\e[31m"; NC="\e[0m"
 
+# --- Banner (informative header) ------------------------
+SCRIPT_VERSION="1.9.3"
+
 banner() {
+  # Gather context quietly
+  local HOSTNAME_SHORT USER_NAME OS_PRETTY OS_CODE KERNEL ARCH NOW
+  HOSTNAME_SHORT="$(hostname -s 2>/dev/null || echo unknown)"
+  USER_NAME="${SUDO_USER:-$USER}"
+  if [ -r /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    OS_PRETTY="${PRETTY_NAME:-$NAME}"
+    OS_CODE="${UBUNTU_CODENAME:-$VERSION_CODENAME}"
+  fi
+  KERNEL="$(uname -r 2>/dev/null || echo unknown)"
+  ARCH="$(uname -m 2>/dev/null || echo unknown)"
+  NOW="$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo '')"
+
+  # Base steps: 7 (curl, status, repo, install/upgrade, enable, test+start, hello-world optional)
+  # If SKIP_HELLO=1, subtract 1 from the estimate.
+  local EST_BASE=6
+  local EST_TOTAL=$EST_BASE
+  if [ "${SKIP_HELLO}" -ne 1 ]; then EST_TOTAL=$((EST_TOTAL + 1)); fi
+  # Note: choosing reinstall/purge will add extra steps dynamically.
+
   echo -e "${BLUE}==============================================${NC}"
   echo -e "${BLUE}            5echo.io - Docker Installer${NC}"
-  echo -e "${BLUE}==============================================${NC}\n"
+  echo -e "${BLUE}==============================================${NC}"
+  echo -e " Script: v${SCRIPT_VERSION}   Steps (est.): ${EST_TOTAL} total"
+  echo -e " Host:   ${HOSTNAME_SHORT}    User:  ${USER_NAME}"
+  [ -n "${OS_PRETTY}" ] && echo -e " OS:     ${OS_PRETTY} (${OS_CODE:-n/a})"
+  echo -e " Kernel: ${KERNEL}    Arch:  ${ARCH}"
+  [ -n "${NOW}" ] && echo -e " Time:   ${NOW}"
+  echo -e " Flags:  REINSTALL=${REINSTALL}  PURGE_DATA=${PURGE_DATA}  SKIP_HELLO=${SKIP_HELLO}"
+  echo -e " Note: Reinstall/purge may add extra steps."
+  echo
 }
 
 # Summary state
@@ -270,16 +302,16 @@ else
       install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 fi
 
-# 6) Enable service
+# 6) Enable Docker service
 run_step "Enabling Docker service" sudo systemctl enable docker
 
-# 7) Start service
-run_step "Starting Docker service" sudo systemctl start docker
+# 7) Test Docker installation (start service + check version)
+run_step "Testing Docker installation" bash -lc '
+  sudo systemctl start docker
+  docker --version
+'
 
-# 8) Test docker binary
-run_step "Testing Docker installation" docker --version
-
-# 9) Hello-world test (optional)
+# 8) Hello-world test (optional)
 if [ "$SKIP_HELLO" -ne 1 ]; then
   run_step "Running Docker hello-world test" sudo docker run --rm hello-world
 fi
