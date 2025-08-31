@@ -3,21 +3,21 @@ set -e
 
 # ========================================================
 #  5echo.io Docker Installer - Ubuntu/Debian
-#  Version: 1.9.5
+#  Version: 1.9.7
 #  Source: https://5echo.io
 # ========================================================
 
 # ---- Config (env-overridable) --------------------------
 REINSTALL="${REINSTALL:-0}"     # 1=force reinstall without prompt
 PURGE_DATA="${PURGE_DATA:-0}"   # 1=purge /var/lib/docker and /etc/docker during reinstall
-SKIP_HELLO="${SKIP_HELLO:-0}"   # 1=skip hello-world test
+SKIP_HELLO="${SKIP_HELLO:-0}"   # 1=skip hello-world inside the test step
 # --------------------------------------------------------
 
 # Colors
 GREEN="\e[32m"; YELLOW="\e[33m"; BLUE="\e[34m"; RED="\e[31m"; NC="\e[0m"
 
 # --- Banner (informative header, aligned) ---------------
-SCRIPT_VERSION="1.9.5"
+SCRIPT_VERSION="1.9.7"
 
 banner() {
   # Gather context quietly
@@ -34,14 +34,10 @@ banner() {
   ARCH="$(uname -m 2>/dev/null || echo unknown)"
   NOW="$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo '')"
 
-  # Base steps: 6 core + optional hello-world
-  local EST_TOTAL=6
-  if [ "${SKIP_HELLO}" -ne 1 ]; then EST_TOTAL=$((EST_TOTAL + 1)); fi
-
   echo -e "${BLUE}==============================================${NC}"
   echo -e "${BLUE}            5echo.io - Docker Installer${NC}"
   echo -e "${BLUE}==============================================${NC}"
-  printf " %-7s v%s   Steps (est.): %d total\n" "Script:" "$SCRIPT_VERSION" "$EST_TOTAL"
+  printf " %-7s v%s\n" "Script:" "$SCRIPT_VERSION"
   printf " %-7s %-22s %-7s %s\n" "Host:" "$HOSTNAME_SHORT" "User:" "$USER_NAME"
   if [ -n "${OS_PRETTY}" ]; then
     printf " %-7s %s (%s)\n" "OS:" "$OS_PRETTY" "${OS_CODE:-n/a}"
@@ -74,7 +70,7 @@ footer() {
 }
 trap footer EXIT
 
-# --- Step numbering & clean spinner (no duration) --------
+# --- Step numbering & clean spinner (ASCII, no duration) -
 STEP_INDEX=0
 
 run_step() {
@@ -85,10 +81,12 @@ run_step() {
   ( "$@" >"$logf" 2>&1 ) &
   local pid=$!
 
-  local spin='|/-\'; local i=0
+  # Robust ASCII spinner (avoid odd glyphs)
+  local spin=( '|' '/' '-' '\' )
+  local i=0
   while kill -0 "$pid" 2>/dev/null; do
-    printf "\r\033[K${BLUE}[%d] %s${NC}  %s" "$STEP_INDEX" "$title" "${spin:$i:1}"
-    i=$(( (i + 1) % 4 ))
+    printf "\r\033[K${BLUE}[%d] %s${NC}  %s" "$STEP_INDEX" "$title" "${spin[$i]}"
+    i=$(( (i + 1) % ${#spin[@]} ))
     sleep 0.15
   done
 
@@ -113,15 +111,13 @@ ask_yes_no() {
   [ "$def" = "Y" ] && prompt="[Y/n]"
   local ans=""
 
-  # Prefer reading from the controlling terminal to ensure prompt is shown
+  # Prefer /dev/tty to ensure prompt shows under sudo/tmux/etc.
   if [ -r /dev/tty ] && [ -w /dev/tty ]; then
     printf "%s %s " "$q" "$prompt" > /dev/tty
     IFS= read -r ans < /dev/tty || true
   elif [ -t 0 ]; then
-    # fallback to stdin if it's a TTY
     read -r -p "$q $prompt " ans || true
   else
-    # non-interactive: keep ans empty to use default below
     :
   fi
 
@@ -246,7 +242,7 @@ if [ "${status:-absent}" != "absent" ]; then
     fi
   else
     if [ "${status}" = "up_to_date" ]; then
-      ACTION="noop"
+      ACTION="cancelled"
       echo -e "${GREEN}Docker is already at the latest version. Exiting.${NC}"
       rm -f "$CHECK_SCRIPT" "$DOCKER_ENV_FILE" 2>/dev/null || true
       exit 0
@@ -281,7 +277,7 @@ if [ "$ACTION" = "unknown" ]; then
   case "${status:-absent}" in
     absent)       ACTION="install" ;;
     needs_update) ACTION="upgrade" ;;
-    up_to_date)   ACTION="noop" ;;  # handled above
+    up_to_date)   ACTION="cancelled" ;;  # defensive
     *)            ACTION="install" ;;
   esac
 fi
@@ -318,16 +314,14 @@ fi
 # 6) Enable Docker service
 run_step "Enabling Docker service" sudo systemctl enable docker
 
-# 7) Test Docker installation (start service + check version)
+# 7) Test Docker installation (start service + version + optional hello-world)
 run_step "Testing Docker installation" bash -lc '
   sudo systemctl start docker
   docker --version
+  if [ '"$SKIP_HELLO"' -ne 1 ]; then
+    sudo docker run --rm hello-world
+  fi
 '
-
-# 8) Hello-world test (optional)
-if [ "$SKIP_HELLO" -ne 1 ]; then
-  run_step "Running Docker hello-world test" sudo docker run --rm hello-world
-fi
 
 # Cleanup
 rm -f "$CHECK_SCRIPT" "$DOCKER_ENV_FILE" 2>/dev/null || true
