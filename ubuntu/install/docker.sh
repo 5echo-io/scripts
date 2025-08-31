@@ -3,7 +3,7 @@ set -e
 
 # ========================================================
 #  5echo.io Docker Installer - Ubuntu/Debian
-#  Version: 1.4.0
+#  Version: 1.5.0
 #  Source: https://5echo.io
 # ========================================================
 
@@ -14,14 +14,13 @@ BLUE="\e[34m"
 RED="\e[31m"
 NC="\e[0m" # Reset
 
-# --- Progress bar state ---
+# --- Progress bar state (overall) ---
 TOTAL_STEPS=9
 CURRENT_STEP=0
 
 # Terminal capabilities (for sticky bar)
 USE_TPUT=0
 if command -v tput >/dev/null 2>&1 && [ -n "${TERM:-}" ] && [ "${TERM}" != "dumb" ]; then
-  # ensure we can position the cursor
   if tput cup 0 0 >/dev/null 2>&1; then
     USE_TPUT=1
   fi
@@ -33,8 +32,8 @@ progress_make_bar() {
   local filled=$(( percent * width / 100 ))
   local empty=$(( width - filled ))
   local bar
-  bar="$(printf '%*s' "$filled" '' | tr ' ' '▉')"
-  bar="$bar$(printf '%*s' "$empty" '' | tr ' ' '·')"
+  bar="$(printf '%*s' "$filled" '' | tr ' ' '#')"
+  bar="$bar$(printf '%*s' "$empty" '' | tr ' ' '-')"
   printf "Progress: [%s] %3d%%" "$bar" "$percent"
 }
 
@@ -43,19 +42,15 @@ progress_draw() {
   local total="$2"
   local percent=$(( 100 * current / total ))
   if [ "$USE_TPUT" -eq 1 ]; then
-    # Sticky at bottom
-    tput sc                                # save cursor
-    local lines cols
-    lines="$(tput lines)"
-    cols="$(tput cols)" || true
-    tput cup $((lines - 1)) 0              # move to last line
-    tput el                                # clear line
+    tput sc
+    local lines; lines="$(tput lines)"
+    tput cup $((lines - 1)) 0
+    tput el
     echo -ne "${BLUE}"
     progress_make_bar "$percent"
     echo -ne "${NC}"
-    tput rc                                # restore cursor
+    tput rc
   else
-    # Non-sticky fallback (prints a normal line)
     echo -e "${BLUE}$(progress_make_bar "$percent")${NC}"
   fi
 }
@@ -63,8 +58,7 @@ progress_draw() {
 progress_clear_sticky() {
   if [ "$USE_TPUT" -eq 1 ]; then
     tput sc
-    local lines
-    lines="$(tput lines)"
+    local lines; lines="$(tput lines)"
     tput cup $((lines - 1)) 0
     tput el
     tput rc
@@ -84,9 +78,8 @@ banner() {
 }
 
 footer() {
-  # At exit, show final static 100% progress and footer (even on early exit)
+  # All exits show a clean final 100% line + footer
   progress_clear_sticky
-  # Print a static (non-sticky) final progress line at 100%
   local _old="$USE_TPUT"
   USE_TPUT=0
   progress_draw "$TOTAL_STEPS" "$TOTAL_STEPS"
@@ -98,7 +91,7 @@ footer() {
 # Always show footer on exit (success, failure, or early exit)
 trap footer EXIT
 
-# Spinner while process runs
+# Spinner for short tasks (non-apt). No constant redraw (avoids flicker).
 loading() {
   local message="$1"
   shift
@@ -112,8 +105,6 @@ loading() {
   while kill -0 $pid 2>/dev/null; do
     printf "\r${BLUE}${message}${NC} ${spin:$i:1}"
     i=$(( (i + 1) % 4 ))
-    # keep sticky progress visible during long steps
-    progress_draw "$CURRENT_STEP" "$TOTAL_STEPS"
     sleep 0.2
   done
 
@@ -128,14 +119,26 @@ loading() {
   fi
 }
 
+# For apt operations: show native apt progress bar (no backgrounding or redirection)
+apt_run() {
+  local title="$1"; shift
+  echo -e "${BLUE}${title}${NC}"
+  progress_clear_sticky
+  export DEBIAN_FRONTEND=noninteractive
+  export NEEDRESTART_MODE=a
+  sudo apt-get -o Dpkg::Progress-Fancy=1 -y \
+       -o Dpkg::Options::="--force-confdef" \
+       -o Dpkg::Options::="--force-confold" \
+       "$@"
+  echo
+}
+
 # === Start ===
 clear
 banner
-
-# Initial progress line at 0%
 progress_draw 0 "$TOTAL_STEPS"
 
-# Ensure curl is installed (needed later for repo key fetch)
+# 1) Ensure curl is installed
 loading "Checking curl (and installing if missing)" bash -c "
   if ! command -v curl >/dev/null 2>&1; then
     sudo apt-get update -qq && sudo apt-get install -y curl
@@ -143,7 +146,7 @@ loading "Checking curl (and installing if missing)" bash -c "
 "
 progress_advance
 
-# Prepare a small helper script to check Docker status safely (avoid complex quoting)
+# 2) Check Docker status via helper (avoid quoting issues)
 STATUS_FILE="/tmp/docker_status_5echo"
 CHECK_SCRIPT="$(mktemp /tmp/5echo-check-docker.XXXXXX.sh)"
 
@@ -160,7 +163,7 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 0
 fi
 
-# Make sure Docker repo exists so candidate version is accurate
+# Ensure Docker repo exists so candidate version is accurate
 sudo install -m 0755 -d /etc/apt/keyrings
 
 if [ ! -f /etc/apt/keyrings/docker.asc ]; then
@@ -182,7 +185,6 @@ if dpkg -s docker-ce >/dev/null 2>&1; then
 elif dpkg -s docker.io >/dev/null 2>&1; then
   PKG=docker.io
 else
-  # unknown origin (snap/other) -> mark needs_update/migrate
   echo "needs_update" > "$STATUS_FILE"
   exit 0
 fi
@@ -198,16 +200,14 @@ if [ "$PKG" = "docker-ce" ]; then
   exit 0
 fi
 
-# docker.io installed -> prefer migrate/update to docker-ce
+# docker.io installed -> migrate/update to docker-ce
 if [ "$PKG" = "docker.io" ]; then
   echo "needs_update" > "$STATUS_FILE"
   exit 0
 fi
 EOS
-
 chmod +x "$CHECK_SCRIPT"
 
-# Run the check
 loading "Checking Docker status" bash "$CHECK_SCRIPT"
 progress_advance
 
@@ -215,12 +215,11 @@ DOCKER_STATUS="$(cat "$STATUS_FILE" 2>/dev/null || echo absent)"
 
 if [ "$DOCKER_STATUS" = "up_to_date" ]; then
   echo -e "${GREEN}Docker is already at the latest version. Exiting.${NC}"
-  # Early exit – progress to 100% is handled in footer via trap
   rm -f "$CHECK_SCRIPT" "$STATUS_FILE" 2>/dev/null || true
   exit 0
 fi
 
-# Remove old Docker packages (only if we install/upgrade)
+# 3) Remove old Docker packages (quiet clean-up)
 loading "Removing old Docker packages" bash -c "
   for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
     sudo apt-get remove -y \$pkg >/dev/null 2>&1 || true
@@ -228,7 +227,7 @@ loading "Removing old Docker packages" bash -c "
 "
 progress_advance
 
-# Add/refresh Docker repository
+# 4) Add/refresh Docker repository
 loading "Adding Docker repository" bash -c "
   sudo apt-get update -qq &&
   sudo apt-get install -y ca-certificates curl gnupg lsb-release >/dev/null &&
@@ -243,28 +242,29 @@ loading "Adding Docker repository" bash -c "
 "
 progress_advance
 
-# Install/Upgrade
+# 5) Install/Upgrade (foreground, show apt progress bar)
 if [ "$DOCKER_STATUS" = "needs_update" ]; then
-  loading "Upgrading Docker to latest" sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  apt_run "Upgrading Docker to latest" install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 else
-  loading "Installing Docker packages" sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  apt_run "Installing Docker packages" install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 fi
 progress_advance
 
-# Enable and start Docker
+# 6) Enable Docker service
 loading "Enabling Docker service" sudo systemctl enable docker
 progress_advance
 
+# 7) Start Docker service
 loading "Starting Docker service" sudo systemctl start docker
 progress_advance
 
-# Test Docker installation
+# 8) Test Docker installation
 loading "Testing Docker installation" docker --version
 progress_advance
 
-# Run hello-world container
+# 9) Run hello-world
 loading "Running Docker hello-world test" sudo docker run --rm hello-world
 progress_advance
 
-# Cleanup helper
+# Cleanup
 rm -f "$CHECK_SCRIPT" "$STATUS_FILE" 2>/dev/null || true
