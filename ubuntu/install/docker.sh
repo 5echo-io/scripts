@@ -3,7 +3,7 @@ set -e
 
 # ========================================================
 #  5echo.io Docker Installer - Ubuntu/Debian
-#  Version: 1.9.1
+#  Version: 1.9.2
 #  Source: https://5echo.io
 # ========================================================
 
@@ -42,75 +42,32 @@ footer() {
 }
 trap footer EXIT
 
-# --- Step numbering & spinner with live duration (right-aligned) ---
+# --- Step numbering & clean spinner (no duration) --------
 STEP_INDEX=0
-
-term_cols() {
-  local c
-  c="$(tput cols 2>/dev/null || true)"
-  if [ -z "$c" ]; then
-    # Fallback via stty, else default
-    c="$(stty size 2>/dev/null | awk '{print $2}')"
-  fi
-  echo "${c:-0}"
-}
 
 run_step() {
   local title="$1"; shift
   STEP_INDEX=$((STEP_INDEX + 1))
   local logf; logf="$(mktemp /tmp/5echo-step.XXXXXX.log)"
 
-  # time start (ms)
-  local start_ms
-  start_ms="$(date +%s%3N 2>/dev/null || { echo $(( $(date +%s) * 1000 )); })"
-
   ( "$@" >"$logf" 2>&1 ) &
   local pid=$!
 
   local spin='|/-\'; local i=0
   while kill -0 "$pid" 2>/dev/null; do
-    # elapsed
-    local now_ms elapsed_ms elapsed_s dur_text cols colpos
-    now_ms="$(date +%s%3N 2>/dev/null || { echo $(( $(date +%s) * 1000 )); })"
-    elapsed_ms=$(( now_ms - start_ms ))
-    elapsed_s="$(awk "BEGIN { printf \"%.2f\", ${elapsed_ms}/1000 }")"
-    dur_text="${elapsed_s}s"
-
-    # left side (no duration yet)
     printf "\r\033[K${BLUE}[%d] %s${NC}  %s" "$STEP_INDEX" "$title" "${spin:$i:1}"
-
-    # place duration at the right edge if we know terminal width
-    cols="$(term_cols)"
-    if [ "$cols" -gt 0 ]; then
-      colpos=$(( cols - ${#dur_text} ))
-      if [ "$colpos" -gt 1 ]; then
-        printf "\033[%dG%s" "$colpos" "$dur_text"
-      else
-        printf "  %s" "$dur_text"
-      fi
-    else
-      printf "  %s" "$dur_text"
-    fi
-
     i=$(( (i + 1) % 4 ))
     sleep 0.15
   done
 
   wait "$pid"; local rc=$?
-
-  # final duration
-  local end_ms elapsed_ms elapsed_s
-  end_ms="$(date +%s%3N 2>/dev/null || { echo $(( $(date +%s) * 1000 )); })"
-  elapsed_ms=$(( end_ms - start_ms ))
-  elapsed_s="$(awk "BEGIN { printf \"%.2f\", ${elapsed_ms}/1000 }")"
-
   printf "\r\033[K"  # clear spinner line
 
   if [ $rc -eq 0 ]; then
-    echo -e "${GREEN}[${STEP_INDEX}] ${title}... Done! (${elapsed_s}s)${NC}"
+    echo -e "${GREEN}[${STEP_INDEX}] ${title}... Done!${NC}"
     rm -f "$logf"
   else
-    echo -e "${RED}[${STEP_INDEX}] ${title}... Failed! (${elapsed_s}s)${NC}"
+    echo -e "${RED}[${STEP_INDEX}] ${title}... Failed!${NC}"
     echo -e "${YELLOW}Last 80 log lines:${NC}"
     tail -n 80 "$logf" || true
     echo -e "${YELLOW}Full log:${NC} $logf"
