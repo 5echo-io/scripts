@@ -3,7 +3,7 @@ set -e
 
 # ========================================================
 #  5echo.io Docker Installer - Ubuntu/Debian
-#  Version: 1.9.7
+#  Version: 1.9.8
 #  Source: https://5echo.io
 # ========================================================
 
@@ -17,7 +17,7 @@ SKIP_HELLO="${SKIP_HELLO:-0}"   # 1=skip hello-world inside the test step
 GREEN="\e[32m"; YELLOW="\e[33m"; BLUE="\e[34m"; RED="\e[31m"; NC="\e[0m"
 
 # --- Banner (informative header, aligned) ---------------
-SCRIPT_VERSION="1.9.7"
+SCRIPT_VERSION="1.9.8"
 
 banner() {
   # Gather context quietly
@@ -46,8 +46,7 @@ banner() {
   if [ -n "${NOW}" ]; then
     printf " %-7s %s\n" "Time:" "$NOW"
   fi
-  printf " %-7s REINSTALL=%s  PURGE_DATA=%s  SKIP_HELLO=%s\n" "Flags:" "$REINSTALL" "$PURGE_DATA" "$SKIP_HELLO"
-  printf " %-7s %s\n\n" "Note:" "Reinstall/purge may add extra steps."
+  echo
 }
 
 # Summary state
