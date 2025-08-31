@@ -3,7 +3,7 @@ set -e
 
 # ========================================================
 #  5echo.io Docker Installer - Ubuntu/Debian
-#  Version: 1.9.3
+#  Version: 1.9.4
 #  Source: https://5echo.io
 # ========================================================
 
@@ -16,8 +16,8 @@ SKIP_HELLO="${SKIP_HELLO:-0}"   # 1=skip hello-world test
 # Colors
 GREEN="\e[32m"; YELLOW="\e[33m"; BLUE="\e[34m"; RED="\e[31m"; NC="\e[0m"
 
-# --- Banner (informative header) ------------------------
-SCRIPT_VERSION="1.9.3"
+# --- Banner (informative header, aligned) ---------------
+SCRIPT_VERSION="1.9.4"
 
 banner() {
   # Gather context quietly
@@ -34,24 +34,24 @@ banner() {
   ARCH="$(uname -m 2>/dev/null || echo unknown)"
   NOW="$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo '')"
 
-  # Base steps: 7 (curl, status, repo, install/upgrade, enable, test+start, hello-world optional)
-  # If SKIP_HELLO=1, subtract 1 from the estimate.
-  local EST_BASE=6
-  local EST_TOTAL=$EST_BASE
+  # Base steps: 6 core + optional hello-world
+  local EST_TOTAL=6
   if [ "${SKIP_HELLO}" -ne 1 ]; then EST_TOTAL=$((EST_TOTAL + 1)); fi
-  # Note: choosing reinstall/purge will add extra steps dynamically.
 
   echo -e "${BLUE}==============================================${NC}"
   echo -e "${BLUE}            5echo.io - Docker Installer${NC}"
   echo -e "${BLUE}==============================================${NC}"
-  echo -e " Script: v${SCRIPT_VERSION}   Steps (est.): ${EST_TOTAL} total"
-  echo -e " Host:   ${HOSTNAME_SHORT}    User:  ${USER_NAME}"
-  [ -n "${OS_PRETTY}" ] && echo -e " OS:     ${OS_PRETTY} (${OS_CODE:-n/a})"
-  echo -e " Kernel: ${KERNEL}    Arch:  ${ARCH}"
-  [ -n "${NOW}" ] && echo -e " Time:   ${NOW}"
-  echo -e " Flags:  REINSTALL=${REINSTALL}  PURGE_DATA=${PURGE_DATA}  SKIP_HELLO=${SKIP_HELLO}"
-  echo -e " Note: Reinstall/purge may add extra steps."
-  echo
+  printf " %-7s v%s   Steps (est.): %d total\n" "Script:" "$SCRIPT_VERSION" "$EST_TOTAL"
+  printf " %-7s %-22s %-7s %s\n" "Host:" "$HOSTNAME_SHORT" "User:" "$USER_NAME"
+  if [ -n "${OS_PRETTY}" ]; then
+    printf " %-7s %s (%s)\n" "OS:" "$OS_PRETTY" "${OS_CODE:-n/a}"
+  fi
+  printf " %-7s %-22s %-7s %s\n" "Kernel:" "$KERNEL" "Arch:" "$ARCH"
+  if [ -n "${NOW}" ]; then
+    printf " %-7s %s\n" "Time:" "$NOW"
+  fi
+  printf " %-7s REINSTALL=%s  PURGE_DATA=%s  SKIP_HELLO=%s\n" "Flags:" "$REINSTALL" "$PURGE_DATA" "$SKIP_HELLO"
+  printf " %-7s %s\n\n" "Note:" "Reinstall/purge may add extra steps."
 }
 
 # Summary state
