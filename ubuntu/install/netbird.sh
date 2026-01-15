@@ -2,22 +2,22 @@
 set -e
 
 # ========================================================
-#  5echo.io - Clean Ubuntu Bootstrap + NetBird Client
-#  Version: 0.1.0
+#  5echo.io - Ubuntu Bootstrap + NetBird Client (local dir)
+#  Version: 0.2.0
 #  Source:  https://5echo.io
 # ========================================================
 
 # ---- Config (env-overridable) --------------------------
-INSTALL_DIR="${INSTALL_DIR:-/opt/Netbird}"       # Where to create the Netbird folder
-NB_SETUP_KEY="${NB_SETUP_KEY:-}"                 # If set, no prompt needed
-DEFAULT_NB_SETUP_KEY="${DEFAULT_NB_SETUP_KEY:-}" # Optional future "default for all"
-AUTO_YES="${AUTO_YES:-1}"                        # 1=noninteractive apt
+DEFAULT_MONITORING_KEY="${DEFAULT_MONITORING_KEY:-09290FC5-F263-4476-949E-1348CD7F09AE}"
+NB_SETUP_KEY="${NB_SETUP_KEY:-}"           # If set, no prompts needed
+NETBIRD_DIR="${NETBIRD_DIR:-netbird}"      # local folder name (relative)
+SKIP_HELLO="${SKIP_HELLO:-1}"              # keep for parity (unused here)
 # --------------------------------------------------------
 
 # Colors
 GREEN="\e[32m"; YELLOW="\e[33m"; BLUE="\e[34m"; RED="\e[31m"; NC="\e[0m"
 
-SCRIPT_VERSION="0.1.0"
+SCRIPT_VERSION="0.2.0"
 
 banner() {
   local HOSTNAME_SHORT USER_NAME OS_PRETTY OS_CODE KERNEL ARCH NOW
@@ -57,15 +57,15 @@ SUMMARY_NETBIRD=""
 footer() {
   echo -e "\n${YELLOW}Summary:${NC}"
   echo -e "  Action: ${BLUE}${ACTION}${NC}"
-  [ -n "$SUMMARY_DIR" ]    && echo -e "  Folder: ${SUMMARY_DIR}"
-  [ -n "$SUMMARY_DOCKER" ] && echo -e "  Docker: ${SUMMARY_DOCKER}"
-  [ -n "$SUMMARY_NETBIRD" ]&& echo -e "  NetBird: ${SUMMARY_NETBIRD}"
+  [ -n "$SUMMARY_DIR" ]     && echo -e "  Folder: ${SUMMARY_DIR}"
+  [ -n "$SUMMARY_DOCKER" ]  && echo -e "  Docker: ${SUMMARY_DOCKER}"
+  [ -n "$SUMMARY_NETBIRD" ] && echo -e "  NetBird: ${SUMMARY_NETBIRD}"
   echo -e "\n${YELLOW}Powered by 5echo.io${NC}"
   echo -e "${BLUE}2026 © 5echo.io${NC}\n"
 }
 trap footer EXIT
 
-# --- Step numbering & clean spinner ----------------------
+# --- Step numbering & spinner ---------------------------
 STEP_INDEX=0
 
 run_step() {
@@ -99,8 +99,26 @@ run_step() {
   fi
 }
 
+ask_yes_no() {
+  local q="$1"; local def="${2:-Y}"; local prompt="[Y/n]"
+  [ "$def" = "N" ] && prompt="[y/N]"
+  local ans=""
+
+  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    printf "%s %s " "$q" "$prompt" > /dev/tty
+    IFS= read -r ans < /dev/tty || true
+  elif [ -t 0 ]; then
+    read -r -p "$q $prompt " ans || true
+  fi
+
+  case "$ans" in
+    y|Y|yes|YES) return 0 ;;
+    n|N|no|NO)   return 1 ;;
+    *)           [ "$def" = "Y" ] && return 0 || return 1 ;;
+  esac
+}
+
 ask_input_hidden() {
-  # usage: ask_input_hidden "Prompt" varname
   local prompt="$1"
   local __varname="$2"
   local ans=""
@@ -112,11 +130,9 @@ ask_input_hidden() {
     stty echo < /dev/tty 2>/dev/null || true
     printf "\n" > /dev/tty
   else
-    # fallback (not hidden)
     read -r -p "$prompt " ans || true
   fi
 
-  # shellcheck disable=SC2163
   eval "$__varname=\"\$ans\""
 }
 
@@ -124,25 +140,30 @@ ask_input_hidden() {
 clear
 banner
 
+# 0) Ensure we're root (script uses sudo, but this avoids weirdness)
+if [ "$(id -u)" -ne 0 ]; then
+  echo -e "${RED}Please run with sudo:${NC} sudo bash <script>"
+  exit 1
+fi
+
 # 1) Update & Upgrade
 run_step "Updating and upgrading system packages" bash -lc '
   export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-  sudo -E apt-get update -y
-  sudo -E apt-get upgrade -y
+  apt-get update -y
+  apt-get upgrade -y
 '
 
 # 2) Ensure curl
 run_step "Installing curl" bash -lc '
   export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
-  sudo -E apt-get install -y curl
+  apt-get install -y curl
 '
 
-# 3) Install Docker via 5echo script
+# 3) Install Docker (via your existing docker installer)
 run_step "Installing Docker (via scripts.5echo.io)" bash -lc '
-  curl -fsSL https://scripts.5echo.io/ubuntu/install/docker.sh | sudo bash
+  curl -fsSL https://scripts.5echo.io/ubuntu/install/docker.sh | bash
 '
 
-# Quick sanity check
 if command -v docker >/dev/null 2>&1; then
   SUMMARY_DOCKER="$(docker --version 2>/dev/null || true)"
 else
@@ -151,30 +172,32 @@ else
   exit 1
 fi
 
-# 4) Create Netbird folder + docker-compose.yaml
-run_step "Creating Netbird folder" bash -lc '
-  sudo mkdir -p "'"$INSTALL_DIR"'"
-  sudo chmod 755 "'"$INSTALL_DIR"'"
-'
-SUMMARY_DIR="$INSTALL_DIR"
-
-# 4b) Ask for NB_SETUP_KEY (supports future defaults)
+# 4) Decide key (default monitoring key vs custom)
 if [ -z "$NB_SETUP_KEY" ]; then
-  if [ -n "$DEFAULT_NB_SETUP_KEY" ]; then
-    NB_SETUP_KEY="$DEFAULT_NB_SETUP_KEY"
+  echo -e "${YELLOW}NetBird setup key:${NC}"
+  echo -e "  Default monitoring key is set."
+  if ask_yes_no "Use Default monitoring key?" "Y"; then
+    NB_SETUP_KEY="$DEFAULT_MONITORING_KEY"
   else
-    ask_input_hidden "Enter NB_SETUP_KEY (hidden input):" NB_SETUP_KEY
+    ask_input_hidden "Enter custom NB_SETUP_KEY (hidden input):" NB_SETUP_KEY
   fi
 fi
 
 if [ -z "$NB_SETUP_KEY" ]; then
-  echo -e "${RED}NB_SETUP_KEY was empty. Aborting (to avoid deploying a broken config).${NC}"
+  echo -e "${RED}NB_SETUP_KEY is empty. Aborting.${NC}"
   exit 1
 fi
 
-run_step "Writing docker-compose.yaml for NetBird client" bash -lc '
-  tmpf="$(mktemp /tmp/netbird-compose.XXXXXX.yaml)"
-  cat > "$tmpf" <<EOF
+# 5) Create local folder (visible with ls/la) and write compose there
+run_step "Creating local folder ./${NETBIRD_DIR}" bash -lc '
+  mkdir -p "'"$NETBIRD_DIR"'"
+'
+
+SUMMARY_DIR="$(pwd)/${NETBIRD_DIR}"
+
+run_step "Writing docker-compose.yaml in ./${NETBIRD_DIR}" bash -lc '
+  cd "'"$NETBIRD_DIR"'"
+  cat > docker-compose.yaml <<EOF
 version: "3.8"
 
 services:
@@ -192,15 +215,14 @@ services:
 volumes:
   netbird-client:
 EOF
-  sudo mv "$tmpf" "'"$INSTALL_DIR"'/docker-compose.yaml"
-  sudo chmod 600 "'"$INSTALL_DIR"'/docker-compose.yaml"
+  chmod 600 docker-compose.yaml
 '
 
-# 5) Start container
+# 6) Start container
 run_step "Starting NetBird client container" bash -lc '
-  cd "'"$INSTALL_DIR"'"
-  sudo docker compose up -d
-  sudo docker ps --filter "name=netbird-client" --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
+  cd "'"$NETBIRD_DIR"'"
+  docker compose up -d
+  docker ps --filter "name=netbird-client" --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"
 '
 
 SUMMARY_NETBIRD="deployed (container: netbird-client)"
