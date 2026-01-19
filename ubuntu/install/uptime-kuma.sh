@@ -3,7 +3,7 @@ set -e
 
 # ========================================================
 #  5echo.io Uptime Kuma + MariaDB Installer (Docker Compose)
-#  Version: 1.0.0
+#  Version: 1.0.1
 #  Source : https://5echo.io
 # ========================================================
 
@@ -12,8 +12,8 @@ APP_DIR="${APP_DIR:-/uptimekuma}"
 HOST_PORT="${HOST_PORT:-3001}"
 DB_NAME="${DB_NAME:-uptimekuma}"
 DB_USER="${DB_USER:-kumauser}"
-DB_PASS="${DB_PASS:-}"          # auto-generate if empty
-DB_ROOT_PASS="${DB_ROOT_PASS:-}"# auto-generate if empty
+DB_PASS="${DB_PASS:-}"           # auto-generate if empty
+DB_ROOT_PASS="${DB_ROOT_PASS:-}" # auto-generate if empty
 USE_TRAEFIK_NET="${USE_TRAEFIK_NET:-0}"  # 1=attach to external kuma_net
 FORCE_REDEPLOY="${FORCE_REDEPLOY:-0}"    # 1=stop/remove existing containers + redeploy
 # --------------------------------------------------------
@@ -21,7 +21,7 @@ FORCE_REDEPLOY="${FORCE_REDEPLOY:-0}"    # 1=stop/remove existing containers + r
 # Colors
 GREEN="\e[32m"; YELLOW="\e[33m"; BLUE="\e[34m"; RED="\e[31m"; NC="\e[0m"
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.0.1"
 
 # Summary state
 ACTION="unknown"
@@ -29,6 +29,14 @@ SUMMARY_PATH=""
 SUMMARY_PORT=""
 SUMMARY_URL=""
 SUMMARY_DOCKER=""
+
+# Detect if we have a real interactive TTY (important for curl|bash)
+HAS_TTY=0
+if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+  HAS_TTY=1
+elif [ -t 0 ]; then
+  HAS_TTY=1
+fi
 
 banner() {
   local HOSTNAME_SHORT USER_NAME OS_PRETTY OS_CODE KERNEL ARCH NOW
@@ -112,13 +120,13 @@ ask_yes_no() {
   [ "$def" = "Y" ] && prompt="[Y/n]"
   local ans=""
 
-  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+  if [ "$HAS_TTY" -eq 1 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
     printf "%s %s " "$q" "$prompt" > /dev/tty
     IFS= read -r ans < /dev/tty || true
-  elif [ -t 0 ]; then
+  elif [ "$HAS_TTY" -eq 1 ] && [ -t 0 ]; then
     read -r -p "$q $prompt " ans || true
   else
-    :
+    ans=""
   fi
 
   case "$ans" in
@@ -129,13 +137,14 @@ ask_yes_no() {
 }
 
 ask_input() {
-  # usage: ask_input "Question" "default" -> prints answer
   local q="$1"; local def="$2"; local ans=""
-  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+  if [ "$HAS_TTY" -eq 1 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
     printf "%s [%s]: " "$q" "$def" > /dev/tty
     IFS= read -r ans < /dev/tty || true
-  else
+  elif [ "$HAS_TTY" -eq 1 ] && [ -t 0 ]; then
     read -r -p "$q [$def]: " ans || true
+  else
+    ans="$def"
   fi
   [ -z "$ans" ] && ans="$def"
   printf "%s" "$ans"
@@ -145,15 +154,10 @@ gen_pw() {
   tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24
 }
 
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || { echo -e "${RED}Missing: $1${NC}"; exit 1; }
-}
-
 # === Start ===
-clear
-banner
-
 ACTION="install"
+clear >/dev/null 2>&1 || true
+banner
 
 # 1) Check prerequisites (docker + compose)
 run_step "Checking prerequisites (docker + compose)" bash -lc '
@@ -161,23 +165,26 @@ run_step "Checking prerequisites (docker + compose)" bash -lc '
   docker compose version >/dev/null 2>&1
 '
 
-# 2) Collect config (TTY-safe)
-if [ "$FORCE_REDEPLOY" -ne 1 ]; then
+# 2) Config collection:
+# If no TTY (common with curl|bash), we skip prompts and use defaults/env vars.
+if [ "$HAS_TTY" -eq 1 ] && [ "$FORCE_REDEPLOY" -ne 1 ]; then
   echo -e "${YELLOW}Config:${NC} (trykk Enter for standard)"
   HOST_PORT="$(ask_input "Host port for Uptime Kuma" "$HOST_PORT")"
   APP_DIR="$(ask_input "Install path" "$APP_DIR")"
   DB_NAME="$(ask_input "MariaDB database name" "$DB_NAME")"
   DB_USER="$(ask_input "MariaDB user" "$DB_USER")"
+
   if ask_yes_no "Use external Traefik network 'kuma_net'?" "N"; then
     USE_TRAEFIK_NET=1
   else
     USE_TRAEFIK_NET=0
   fi
+
   if ask_yes_no "Redeploy (stop/remove existing uptime-kuma containers)?" "N"; then
     FORCE_REDEPLOY=1
   fi
 else
-  USE_TRAEFIK_NET="${USE_TRAEFIK_NET:-0}"
+  echo -e "${YELLOW}No interactive TTY detected (or FORCE_REDEPLOY=1). Using defaults/env vars.${NC}"
 fi
 
 # Auto-generate passwords if empty
@@ -186,6 +193,7 @@ fi
 
 SUMMARY_PATH="$APP_DIR"
 SUMMARY_PORT="$HOST_PORT"
+SUMMARY_URL="http://SERVER-IP:${HOST_PORT}"
 
 # 3) Create directory
 run_step "Preparing install directory" bash -lc "
@@ -203,7 +211,7 @@ fi
 
 # 5) Write docker-compose.yml
 run_step "Writing docker-compose.yml" bash -lc "
-  cat > '$APP_DIR/docker-compose.yml' <<'EOF'
+  cat > '$APP_DIR/docker-compose.yml' <<EOF
 services:
   mariadb:
     image: mariadb:11
@@ -218,13 +226,13 @@ services:
       - ./mariadb-data:/var/lib/mysql
 EOF
   if [ '$USE_TRAEFIK_NET' -eq 1 ]; then
-    cat >> '$APP_DIR/docker-compose.yml' <<'EOF'
+    cat >> '$APP_DIR/docker-compose.yml' <<EOF
     networks:
       - kuma_net
 EOF
   fi
 
-  cat >> '$APP_DIR/docker-compose.yml' <<'EOF'
+  cat >> '$APP_DIR/docker-compose.yml' <<EOF
 
   uptime-kuma:
     image: louislam/uptime-kuma:2
@@ -246,7 +254,7 @@ EOF
       UPTIME_KUMA_IN_CONTAINER: 'true'
 EOF
   if [ '$USE_TRAEFIK_NET' -eq 1 ]; then
-    cat >> '$APP_DIR/docker-compose.yml' <<'EOF'
+    cat >> '$APP_DIR/docker-compose.yml' <<EOF
     networks:
       - kuma_net
 
@@ -272,8 +280,6 @@ run_step "Starting stack" bash -lc "
 run_step "Showing container status" bash -lc "
   sudo docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' | sed -n '1p;/uptime-kuma/p;/uptimekuma-mariadb/p'
 "
-
-SUMMARY_URL="http://SERVER-IP:${HOST_PORT}"
 
 echo -e "\n${GREEN}Uptime Kuma is up!${NC}"
 echo -e "Open: ${BLUE}http://SERVER-IP:${HOST_PORT}${NC}\n"
