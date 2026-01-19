@@ -3,7 +3,7 @@ set -e
 
 # ========================================================
 #  5echo.io Uptime Kuma + MariaDB Installer (Docker Compose)
-#  Version: 1.0.1
+#  Version: 1.0.2
 #  Source : https://5echo.io
 # ========================================================
 
@@ -12,8 +12,8 @@ APP_DIR="${APP_DIR:-/uptimekuma}"
 HOST_PORT="${HOST_PORT:-3001}"
 DB_NAME="${DB_NAME:-uptimekuma}"
 DB_USER="${DB_USER:-kumauser}"
-DB_PASS="${DB_PASS:-}"           # auto-generate if empty
-DB_ROOT_PASS="${DB_ROOT_PASS:-}" # auto-generate if empty
+DB_PASS="${DB_PASS:-}"            # auto-generate if empty
+DB_ROOT_PASS="${DB_ROOT_PASS:-}"  # auto-generate if empty
 USE_TRAEFIK_NET="${USE_TRAEFIK_NET:-0}"  # 1=attach to external kuma_net
 FORCE_REDEPLOY="${FORCE_REDEPLOY:-0}"    # 1=stop/remove existing containers + redeploy
 # --------------------------------------------------------
@@ -21,7 +21,7 @@ FORCE_REDEPLOY="${FORCE_REDEPLOY:-0}"    # 1=stop/remove existing containers + r
 # Colors
 GREEN="\e[32m"; YELLOW="\e[33m"; BLUE="\e[34m"; RED="\e[31m"; NC="\e[0m"
 
-SCRIPT_VERSION="1.0.1"
+SCRIPT_VERSION="1.0.2"
 
 # Summary state
 ACTION="unknown"
@@ -150,44 +150,30 @@ ask_input() {
   printf "%s" "$ans"
 }
 
-gen_pw() {
-  tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24
-}
+gen_pw() { tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24; }
 
 # === Start ===
 ACTION="install"
 clear >/dev/null 2>&1 || true
 banner
 
-# 1) Check prerequisites (docker + compose)
 run_step "Checking prerequisites (docker + compose)" bash -lc '
   command -v docker >/dev/null 2>&1
   docker compose version >/dev/null 2>&1
 '
 
-# 2) Config collection:
-# If no TTY (common with curl|bash), we skip prompts and use defaults/env vars.
 if [ "$HAS_TTY" -eq 1 ] && [ "$FORCE_REDEPLOY" -ne 1 ]; then
   echo -e "${YELLOW}Config:${NC} (trykk Enter for standard)"
   HOST_PORT="$(ask_input "Host port for Uptime Kuma" "$HOST_PORT")"
   APP_DIR="$(ask_input "Install path" "$APP_DIR")"
   DB_NAME="$(ask_input "MariaDB database name" "$DB_NAME")"
   DB_USER="$(ask_input "MariaDB user" "$DB_USER")"
-
-  if ask_yes_no "Use external Traefik network 'kuma_net'?" "N"; then
-    USE_TRAEFIK_NET=1
-  else
-    USE_TRAEFIK_NET=0
-  fi
-
-  if ask_yes_no "Redeploy (stop/remove existing uptime-kuma containers)?" "N"; then
-    FORCE_REDEPLOY=1
-  fi
+  if ask_yes_no "Use external Traefik network 'kuma_net'?" "N"; then USE_TRAEFIK_NET=1; else USE_TRAEFIK_NET=0; fi
+  if ask_yes_no "Redeploy (stop/remove existing uptime-kuma containers)?" "N"; then FORCE_REDEPLOY=1; fi
 else
   echo -e "${YELLOW}No interactive TTY detected (or FORCE_REDEPLOY=1). Using defaults/env vars.${NC}"
 fi
 
-# Auto-generate passwords if empty
 [ -z "$DB_PASS" ] && DB_PASS="$(gen_pw)"
 [ -z "$DB_ROOT_PASS" ] && DB_ROOT_PASS="$(gen_pw)"
 
@@ -195,13 +181,11 @@ SUMMARY_PATH="$APP_DIR"
 SUMMARY_PORT="$HOST_PORT"
 SUMMARY_URL="http://SERVER-IP:${HOST_PORT}"
 
-# 3) Create directory
 run_step "Preparing install directory" bash -lc "
   sudo mkdir -p '$APP_DIR'
   sudo chown '${SUDO_USER:-$USER}':'${SUDO_USER:-$USER}' '$APP_DIR'
 "
 
-# 4) Optional redeploy: stop/remove existing containers
 if [ "$FORCE_REDEPLOY" -eq 1 ]; then
   ACTION="redeploy"
   run_step "Stopping previous uptime-kuma containers (if any)" bash -lc "
@@ -209,7 +193,6 @@ if [ "$FORCE_REDEPLOY" -eq 1 ]; then
   "
 fi
 
-# 5) Write docker-compose.yml
 run_step "Writing docker-compose.yml" bash -lc "
   cat > '$APP_DIR/docker-compose.yml' <<EOF
 services:
@@ -266,24 +249,9 @@ EOF
   fi
 "
 
-# 6) Start stack
-run_step "Pulling images" bash -lc "
-  cd '$APP_DIR'
-  sudo docker compose pull
-"
-run_step "Starting stack" bash -lc "
-  cd '$APP_DIR'
-  sudo docker compose up -d
-"
-
-# 7) Show status
-run_step "Showing container status" bash -lc "
-  sudo docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' | sed -n '1p;/uptime-kuma/p;/uptimekuma-mariadb/p'
-"
+run_step "Pulling images" bash -lc "cd '$APP_DIR' && sudo docker compose pull"
+run_step "Starting stack" bash -lc "cd '$APP_DIR' && sudo docker compose up -d"
+run_step "Showing container status" bash -lc "sudo docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' | sed -n '1p;/uptime-kuma/p;/uptimekuma-mariadb/p'"
 
 echo -e "\n${GREEN}Uptime Kuma is up!${NC}"
 echo -e "Open: ${BLUE}http://SERVER-IP:${HOST_PORT}${NC}\n"
-echo -e "${YELLOW}Tips:${NC}"
-echo -e "  Logs Kuma   : ${BLUE}sudo docker logs -f uptime-kuma${NC}"
-echo -e "  Logs MariaDB: ${BLUE}sudo docker logs -f uptimekuma-mariadb${NC}"
-echo -e "  Manage      : ${BLUE}cd ${APP_DIR} && sudo docker compose down && sudo docker compose up -d${NC}\n"
