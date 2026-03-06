@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ========================================================
-#  5echo.io - NetBird Gateway Installer (v1.4)
-#  Version: 1.4.0
+#  5echo.io - NetBird Gateway Installer + Updater
+#  Version: 1.5.0
 #  Source:  https://5echo.io
 #  Run: curl -fsSL https://scripts.5echo.io/ubuntu/install/netbird.sh | sudo bash
 # ========================================================
@@ -9,13 +9,13 @@
 set -e
 
 APP="NetBird Gateway"
-VERSION="1.4.0"
+VERSION="1.5.0"
 INSTALL_DIR="/opt/netbird"
 
 clear
 
 echo "=============================================="
-echo "        5echo.io - NetBird Gateway Installer"
+echo "      5echo.io - NetBird Gateway Installer + Updater"
 echo "=============================================="
 echo " Script: v$VERSION"
 echo " Run:    curl -fsSL https://scripts.5echo.io/ubuntu/install/netbird.sh | sudo bash"
@@ -33,11 +33,9 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-
 ############################################
 # Hidden input
 ############################################
-
 ask_input_hidden() {
   local prompt="$1"
   local __var="$2"
@@ -54,15 +52,33 @@ ask_input_hidden() {
   eval "$__var=\"\$ans\""
 }
 
+############################################
+# Check if NetBird container exists
+############################################
+CONTAINER_NAME="netbird-client"
+NETBIRD_EXISTS=0
+
+if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$"; then
+  NETBIRD_EXISTS=1
+  echo "Detected existing NetBird container: $CONTAINER_NAME"
+fi
 
 ############################################
 # NetBird Setup Key
 ############################################
-
 NB_SETUP_KEY="${NB_SETUP_KEY:-}"
 
 if [ -z "$NB_SETUP_KEY" ]; then
-  ask_input_hidden "Enter NetBird Setup Key:" NB_SETUP_KEY
+  if [ $NETBIRD_EXISTS -eq 1 ]; then
+    # Try to read existing key from environment
+    NB_SETUP_KEY=$(docker inspect "$CONTAINER_NAME" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep '^NB_SETUP_KEY=' | cut -d= -f2)
+    if [ -n "$NB_SETUP_KEY" ]; then
+      echo "Using existing NB_SETUP_KEY from container."
+    fi
+  fi
+  if [ -z "$NB_SETUP_KEY" ]; then
+    ask_input_hidden "Enter NetBird Setup Key:" NB_SETUP_KEY
+  fi
 fi
 
 if [ -z "$NB_SETUP_KEY" ]; then
@@ -70,32 +86,25 @@ if [ -z "$NB_SETUP_KEY" ]; then
   exit 1
 fi
 
-
 ############################################
 # Dependencies
 ############################################
-
 echo
 echo "Installing dependencies..."
 apt update -y
 apt install -y curl ca-certificates gnupg lsb-release iproute2 iptables
 
-
 ############################################
 # Docker
 ############################################
-
 if ! command -v docker >/dev/null 2>&1; then
-  echo
   echo "Docker not found — installing..."
   curl -fsSL https://get.docker.com | bash
 fi
 
-
 ############################################
 # Enable IP forwarding
 ############################################
-
 echo
 echo "Enabling IP forwarding..."
 cat <<EOF >/etc/sysctl.d/99-netbird.conf
@@ -104,11 +113,9 @@ net.ipv6.conf.all.forwarding=1
 EOF
 sysctl --system >/dev/null
 
-
 ############################################
 # Detect active interfaces
 ############################################
-
 echo
 echo "Detecting active network interfaces..."
 INTERFACES=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^(eth|wlan|vlan)')
@@ -123,11 +130,9 @@ for iface in $INTERFACES; do
   echo " • $iface"
 done
 
-
 ############################################
 # Detect subnets per interface
 ############################################
-
 SUBNETS=""
 for iface in $INTERFACES; do
   if_subnets=$(ip -o -f inet addr show dev "$iface" | awk '{print $4}')
@@ -142,11 +147,9 @@ for s in $SUBNETS; do
   echo " • $s"
 done
 
-
 ############################################
 # Apply NAT per interface
 ############################################
-
 echo
 echo "Setting up NAT for all interfaces..."
 for iface in $INTERFACES; do
@@ -156,19 +159,15 @@ for iface in $INTERFACES; do
   done
 done
 
-
 ############################################
 # Install directory
 ############################################
-
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
-
 
 ############################################
 # Docker Compose with labels
 ############################################
-
 echo
 echo "Creating docker-compose.yml..."
 cat <<EOF > docker-compose.yml
@@ -178,7 +177,7 @@ services:
 
   netbird:
     image: netbirdio/netbird:latest
-    container_name: netbird-client
+    container_name: $CONTAINER_NAME
     restart: unless-stopped
 
     network_mode: host
@@ -186,42 +185,45 @@ services:
       - NET_ADMIN
 
     environment:
-      - NB_SETUP_KEY=${NB_SETUP_KEY}
+      - NB_SETUP_KEY=$NB_SETUP_KEY
 
     volumes:
       - netbird-client:/var/lib/netbird
 
     labels:
       netbird.role: gateway
-      netbird.subnets: "${SUBNETS}"
+      netbird.subnets: "$SUBNETS"
 
 volumes:
   netbird-client:
 EOF
 
-
 ############################################
-# Start container
+# Update or Start container
 ############################################
-
-echo
-echo "Starting NetBird Gateway container..."
-docker compose up -d
-
+if [ $NETBIRD_EXISTS -eq 1 ]; then
+  echo
+  echo "Updating NetBird container..."
+  docker compose pull
+  docker compose up -d
+else
+  echo
+  echo "Starting NetBird container..."
+  docker compose up -d
+fi
 
 ############################################
 # Done
 ############################################
-
 echo
 echo "=============================================="
-echo " NetBird Gateway installation complete"
+echo " NetBird Gateway installation/update complete"
 echo "=============================================="
 echo
 echo "Install directory: $INSTALL_DIR"
 echo
 echo "Container status:"
-docker ps --filter "name=netbird-client"
+docker ps --filter "name=$CONTAINER_NAME"
 echo
 echo "Detected LAN networks:"
 for s in $SUBNETS; do
