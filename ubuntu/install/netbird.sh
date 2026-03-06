@@ -3,8 +3,9 @@ set -e
 
 # ========================================================
 #  5echo.io - NetBird Client Installer
-#  Version: 1.0.0
+#  Version: 1.1.0
 #  Source:  https://5echo.io
+#  Run: curl -fsSL https://scripts.5echo.io/ubuntu/install/netbird.sh | sudo bash
 # ========================================================
 
 NETBIRD_DIR="${NETBIRD_DIR:-netbird}"
@@ -12,10 +13,9 @@ NB_SETUP_KEY="${NB_SETUP_KEY:-}"
 
 GREEN="\e[32m"; YELLOW="\e[33m"; BLUE="\e[34m"; RED="\e[31m"; NC="\e[0m"
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 
 banner() {
-  local HOSTNAME_SHORT USER_NAME OS_PRETTY OS_CODE KERNEL ARCH NOW
 
   HOSTNAME_SHORT="$(hostname -s)"
   USER_NAME="${SUDO_USER:-$USER}"
@@ -44,9 +44,11 @@ banner() {
 STEP_INDEX=0
 
 run_step() {
-  local title="$1"; shift
-  STEP_INDEX=$((STEP_INDEX + 1))
 
+  local title="$1"
+  shift
+
+  STEP_INDEX=$((STEP_INDEX + 1))
   local logf
   logf="$(mktemp /tmp/netbird-step.XXXXXX.log)"
 
@@ -72,29 +74,35 @@ run_step() {
     rm -f "$logf"
   else
     echo -e "${RED}[${STEP_INDEX}] ${title}... Failed!${NC}"
-    tail -n 50 "$logf"
+    tail -n 80 "$logf"
     exit 1
   fi
 }
 
 ask_input_hidden() {
+
   local prompt="$1"
   local __var="$2"
-  local ans
+  local ans=""
 
-  printf "%s " "$prompt"
-  stty -echo
-  read ans
-  stty echo
-  echo
+  if [ -r /dev/tty ]; then
+    printf "%s " "$prompt" > /dev/tty
+    stty -echo < /dev/tty
+    IFS= read -r ans < /dev/tty
+    stty echo < /dev/tty
+    printf "\n" > /dev/tty
+  else
+    read -r -p "$prompt " ans
+  fi
 
   eval "$__var=\"\$ans\""
 }
 
 footer() {
+
   echo
   echo -e "${YELLOW}Summary:${NC}"
-  echo -e "  NetBird deployed in: ${BLUE}${PWD}/${NETBIRD_DIR}${NC}"
+  echo -e "  NetBird folder: ${BLUE}${PWD}/${NETBIRD_DIR}${NC}"
   echo
   echo -e "${YELLOW}Powered by 5echo.io${NC}"
   echo -e "${BLUE}2026 © 5echo.io${NC}"
@@ -105,72 +113,72 @@ trap footer EXIT
 clear
 banner
 
+# Ensure root
 if [ "$(id -u)" -ne 0 ]; then
-  echo -e "${RED}Run with sudo${NC}"
+  echo -e "${RED}Run with sudo:${NC}"
+  echo "curl -fsSL https://scripts.5echo.io/ubuntu/install/netbird.sh | sudo bash"
   exit 1
 fi
 
-# ------------------------------------------------
-# 1 Ask for setup key
-# ------------------------------------------------
-
+# Ask setup key
 if [ -z "$NB_SETUP_KEY" ]; then
   ask_input_hidden "Enter NetBird Setup Key:" NB_SETUP_KEY
 fi
 
 if [ -z "$NB_SETUP_KEY" ]; then
-  echo -e "${RED}Setup key cannot be empty${NC}"
+  echo -e "${RED}NB_SETUP_KEY cannot be empty${NC}"
   exit 1
 fi
 
-# ------------------------------------------------
-# 2 Enable IP forwarding
-# ------------------------------------------------
+# Install curl if missing
+run_step "Ensuring curl is installed" bash -lc '
+apt-get update -y
+apt-get install -y curl
+'
 
+# Install Docker if missing
+if ! command -v docker >/dev/null 2>&1; then
+
+run_step "Installing Docker" bash -lc '
+curl -fsSL https://scripts.5echo.io/ubuntu/install/docker.sh | bash
+'
+
+fi
+
+# Enable IP forwarding
 run_step "Enabling IP forwarding" bash -lc '
 
 sysctl -w net.ipv4.ip_forward=1
 
-if ! grep -q net.ipv4.ip_forward /etc/sysctl.conf; then
-  echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-fi
+grep -q net.ipv4.ip_forward /etc/sysctl.conf || \
+echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
 '
 
-# ------------------------------------------------
-# 3 Disable rp_filter (needed for routing)
-# ------------------------------------------------
-
+# Disable rp_filter
 run_step "Disabling rp_filter" bash -lc '
 
 sysctl -w net.ipv4.conf.all.rp_filter=0
 sysctl -w net.ipv4.conf.default.rp_filter=0
 '
 
-# ------------------------------------------------
-# 4 Configure firewall (UFW)
-# ------------------------------------------------
-
+# Configure firewall
 run_step "Configuring firewall rules (RFC1918)" bash -lc '
 
 if command -v ufw >/dev/null 2>&1; then
-  ufw allow from 10.0.0.0/8 || true
-  ufw allow from 172.16.0.0/12 || true
-  ufw allow from 192.168.0.0/16 || true
+
+ufw allow from 10.0.0.0/8 || true
+ufw allow from 172.16.0.0/12 || true
+ufw allow from 192.168.0.0/16 || true
+
 fi
 '
 
-# ------------------------------------------------
-# 5 Create directory
-# ------------------------------------------------
-
+# Create directory
 run_step "Creating NetBird directory" bash -lc "
 mkdir -p ${NETBIRD_DIR}
 "
 
-# ------------------------------------------------
-# 6 Write docker compose
-# ------------------------------------------------
-
+# Write docker compose
 run_step "Writing docker compose file" bash -lc "
 
 cat > ${NETBIRD_DIR}/docker-compose.yml <<EOF
@@ -196,10 +204,7 @@ EOF
 chmod 600 ${NETBIRD_DIR}/docker-compose.yml
 "
 
-# ------------------------------------------------
-# 7 Start container
-# ------------------------------------------------
-
+# Start container
 run_step "Starting NetBird container" bash -lc "
 
 cd ${NETBIRD_DIR}
@@ -207,5 +212,6 @@ docker compose up -d
 "
 
 run_step "Verifying container" bash -lc "
-docker ps | grep netbird-client
+
+docker ps --filter name=netbird-client
 "
