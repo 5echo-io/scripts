@@ -5,6 +5,7 @@ set -e
 #  5echo.io Docker Installer - Ubuntu/Debian
 #  Version: 1.9.8
 #  Source: https://5echo.io
+#  Run: curl -fsSL https://scripts.5echo.io/ubuntu/install/docker.sh | sudo bash
 # ========================================================
 
 # ---- Config (env-overridable) --------------------------
