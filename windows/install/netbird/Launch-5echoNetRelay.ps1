@@ -1,19 +1,19 @@
 # ==============================================================================
 # Launch-5echoNetRelay.ps1
-# Launcher – laster ned og kjører 5echo.io NetRelay installasjonsscript
-# Løser problemet med $MyInvocation ved kjøring via iex/irm
+# Launcher - laster ned og kjorer 5echo.io NetRelay installasjonsscript
+# Loser problemet med $MyInvocation ved kjoring via iex/irm
 #
-# BRUK (én kommando i PowerShell):
-#    irm "https://scripts.5echo.io/windows/install/netbird/Launch-5echoNetRelay.ps1" | iex
+# BRUK (en kommando i PowerShell):
+#   irm "https://scripts.5echo.io/windows/install/netbird/Launch-5echoNetRelay.ps1" | iex
 # Fra CMD:
-#    powershell -ExecutionPolicy Bypass -Command "irm 'https://scripts.5echo.io/windows/install/netbird/Launch-5echoNetRelay.ps1' | iex"
+#   powershell -ExecutionPolicy Bypass -Command "irm 'https://scripts.5echo.io/windows/install/netbird/Launch-5echoNetRelay.ps1' | iex"
 # ==============================================================================
 
-$ScriptUrl  = "https://scripts.5echo.io/windows/install/netbird/5echo-NetRelay.ps1"
-$LocalPath  = "$env:TEMP\5echo-NetRelay-$(Get-Random).ps1"
+$ScriptUrl = "https://scripts.5echo.io/windows/install/netbird/5echo-NetRelay.ps1"
+$LocalPath = "$env:TEMP\5echo-NetRelay-$(Get-Random).ps1"
 
 Write-Host ""
-Write-Host "  5echo.io NetRelay – Laster ned installasjonsscript..." -ForegroundColor Cyan
+Write-Host "  5echo.io NetRelay - Laster ned installasjonsscript..." -ForegroundColor Cyan
 
 try {
     $ProgressPreference = 'SilentlyContinue'
@@ -23,8 +23,6 @@ try {
     exit 1
 }
 
-# Kjør det nedlastede scriptet – nå finnes det som fysisk fil,
-# så $MyInvocation og auto-oppdatering fungerer korrekt
 try {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $LocalPath
 } finally {
