@@ -1,11 +1,18 @@
 # ==============================================================================
 # 5echo-NetRelay.ps1
-# 5echo.io NetRelay – Stille installasjon av NetBird
+# 5echo.io NetRelay - Stille installasjon av NetBird
 # Funksjoner: SSH (Windows + NetBird), RDP, Skjult taskbar, Auto-oppdatering
-# Støtter x64 og ARM64 | Admin og vanlig bruker (UAC-elevation)
+# Stotter x64 og ARM64 | Admin og vanlig bruker (UAC-elevation)
 # ==============================================================================
 
 #Requires -Version 5.1
+
+param(
+    [switch]$ElevatedRun,
+    [string]$KeyFile   = "",
+    [switch]$UpdateOnly,
+    [switch]$Uninstall
+)
 
 # ------------------------------------------------------------------------------
 # KONFIGURASJON
@@ -45,16 +52,14 @@ function Get-Architecture {
     if ($arch -eq "ARM64")                       { return "arm64" }
     if ($arch -eq "AMD64")                       { return "amd64" }
     if ($env:PROCESSOR_ARCHITEW6432 -eq "AMD64") { return "amd64" }
-    Write-Log "Ikke-støttet arkitektur: $arch" "ERROR"
+    Write-Log "Ikke-stottet arkitektur: $arch" "ERROR"
     exit 1
 }
 
 function Get-LatestNetbirdVersion {
     Write-Log "Henter siste versjon fra GitHub..."
     try {
-        $release = Invoke-RestMethod `
-            -Uri "https://api.github.com/repos/netbirdio/netbird/releases/latest" `
-            -UseBasicParsing
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/netbirdio/netbird/releases/latest" -UseBasicParsing
         return $release.tag_name.TrimStart("v")
     } catch {
         Write-Log "Kunne ikke hente versjon fra GitHub: $_" "ERROR"
@@ -73,10 +78,9 @@ function Get-InstalledNetbirdVersion {
 }
 
 function Stop-NetbirdProcesses {
-    Write-Log "Stopper eventuelle kjørende prosesser..."
+    Write-Log "Stopper eventuelle kjorende prosesser..."
     @("netbird", "netbird-ui", "netrelay", "wt-go") | ForEach-Object {
-        Get-Process -Name $_ -ErrorAction SilentlyContinue |
-            Stop-Process -Force -ErrorAction SilentlyContinue
+        Get-Process -Name $_ -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -85,8 +89,9 @@ function Test-NetbirdInstalled {
         "$env:ProgramFiles\NetRelay\netbird.exe",
         "$env:ProgramFiles\Netbird\netbird.exe"
     )
-    foreach ($p in $paths) { if (Test-Path $p) { return $true } }
-
+    foreach ($p in $paths) {
+        if (Test-Path $p) { return $true }
+    }
     $roots = @(
         "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
         "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
@@ -108,11 +113,11 @@ function Set-ServiceMasking {
         $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
         if ($svc) {
             & sc.exe config $svcName displayname= "$ServiceDisplayName" 2>&1 | Out-Null
-            & sc.exe description $svcName "$ServiceDisplayName – sikker nettverkstilkobling" 2>&1 | Out-Null
+            & sc.exe description $svcName "$ServiceDisplayName - sikker nettverkstilkobling" 2>&1 | Out-Null
             $svcRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$svcName"
             if (Test-Path $svcRegPath) {
                 Set-ItemProperty -Path $svcRegPath -Name "DisplayName" -Value $ServiceDisplayName -Force -ErrorAction SilentlyContinue
-                Set-ItemProperty -Path $svcRegPath -Name "Description" -Value "$ServiceDisplayName – sikker nettverkstilkobling" -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $svcRegPath -Name "Description" -Value "$ServiceDisplayName - sikker nettverkstilkobling" -Force -ErrorAction SilentlyContinue
                 Set-ItemProperty -Path $svcRegPath -Name "ImagePath"   -Value $MaskedExe -Force -ErrorAction SilentlyContinue
             }
             Write-Log "Service '$svcName' maskert som '$ServiceDisplayName'."
@@ -121,10 +126,8 @@ function Set-ServiceMasking {
 }
 
 function Invoke-Remasking {
-    Write-Log "Kjører re-maskering..."
+    Write-Log "Kjorer re-maskering..."
     $MaskedExe = "$InstallDir\netrelay.exe"
-
-    # Re-maskér installerte applikasjoner
     $roots = @(
         "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
         "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
@@ -135,12 +138,10 @@ function Invoke-Remasking {
             if ($dn -and ($dn -match "(?i)netbird" -or $dn -match "(?i)netrelay")) {
                 Set-ItemProperty -Path $_.PSPath -Name "DisplayName" -Value $ServiceDisplayName -Force
                 Set-ItemProperty -Path $_.PSPath -Name "Publisher"   -Value "5echo.io"          -Force
-                Write-Log "Re-maskert app-oppføring: $($_.PSPath)"
+                Write-Log "Re-maskert: $($_.PSPath)"
             }
         }
     }
-
-    # Re-kopier maskert exe
     $sourceExe = "$InstallDir\netbird.exe"
     if (-not (Test-Path $sourceExe)) { $sourceExe = "$env:ProgramFiles\Netbird\netbird.exe" }
     if (Test-Path $sourceExe) {
@@ -148,25 +149,17 @@ function Invoke-Remasking {
         Copy-Item $sourceExe -Destination $MaskedExe -Force -ErrorAction SilentlyContinue
         Write-Log "netrelay.exe oppdatert."
     }
-
-    # Re-maskér Windows Service
     Set-ServiceMasking
-
-    Write-Log "Re-maskering fullført."
+    Write-Log "Re-maskering fullfort."
 }
 
 # ------------------------------------------------------------------------------
-# PARAMETERE
+# TEMP-MAPPE (trengs tidlig for logging)
 # ------------------------------------------------------------------------------
-param(
-    [switch]$ElevatedRun,
-    [string]$KeyFile   = "",
-    [switch]$UpdateOnly,
-    [switch]$Uninstall
-)
+New-Item -ItemType Directory -Path $TempDir -Force | Out-Null
 
 # ------------------------------------------------------------------------------
-# INSTALLASJONSSJEKK – vis meny dersom allerede installert
+# INSTALLASJONSSJEKK - vis meny dersom allerede installert
 # ------------------------------------------------------------------------------
 if (-not $UpdateOnly -and -not $Uninstall -and -not $ElevatedRun) {
     if (Test-NetbirdInstalled) {
@@ -181,32 +174,29 @@ if (-not $UpdateOnly -and -not $Uninstall -and -not $ElevatedRun) {
         Write-Host "  [2] Avbryt"
         Write-Host ""
         $choice = (Read-Host "Velg [1-2]").Trim()
-        switch ($choice) {
-            "1" {
-                Write-Host ""
-                Write-Host "  Starter avinstallasjon..." -ForegroundColor Cyan
-                $scriptPath = $MyInvocation.MyCommand.Definition
-                $elevArgs   = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -Uninstall"
-                if (Test-IsAdmin) {
-                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$scriptPath" -Uninstall
-                } else {
-                    Start-Process powershell.exe -ArgumentList $elevArgs -Verb RunAs -Wait
-                }
-                exit
+        if ($choice -eq "1") {
+            Write-Host ""
+            Write-Host "  Starter avinstallasjon..." -ForegroundColor Cyan
+            $scriptPath = $MyInvocation.MyCommand.Definition
+            $elevArgs   = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -Uninstall"
+            if (Test-IsAdmin) {
+                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$scriptPath" -Uninstall
+            } else {
+                Start-Process powershell.exe -ArgumentList $elevArgs -Verb RunAs -Wait
             }
-            default {
-                Write-Host "  Avbrutt." -ForegroundColor Gray
-                exit 0
-            }
+            exit
+        } else {
+            Write-Host "  Avbrutt." -ForegroundColor Gray
+            exit 0
         }
     }
 }
 
 # ------------------------------------------------------------------------------
-# SELF-ELEVATION – Kjør på nytt som admin om nødvendig
+# SELF-ELEVATION - Kjor pa nytt som admin om nodvendig
 # ------------------------------------------------------------------------------
 if (-not (Test-IsAdmin)) {
-    Write-Host "[$ServiceDisplayName] Ikke administrator – ber om forhøyede rettigheter via UAC..."
+    Write-Host "[$ServiceDisplayName] Ikke administrator - ber om forhoyede rettigheter via UAC..."
 
     $tempKeyFile = ""
     if (-not $UpdateOnly -and -not $Uninstall) {
@@ -232,11 +222,10 @@ if (-not (Test-IsAdmin)) {
 }
 
 # ------------------------------------------------------------------------------
-# LOGG + TEMP-MAPPE
+# LOGG START
 # ------------------------------------------------------------------------------
-New-Item -ItemType Directory -Path $TempDir -Force | Out-Null
-Write-Log "=== $ServiceDisplayName – $(if ($UpdateOnly) { 'OPPDATERING' } elseif ($Uninstall) { 'AVINSTALLASJON' } else { 'INSTALLASJON' }) starter ==="
-Write-Log "Kjører som: $env:USERNAME | Maskin: $env:COMPUTERNAME"
+Write-Log "=== $ServiceDisplayName - $(if ($UpdateOnly) { 'OPPDATERING' } elseif ($Uninstall) { 'AVINSTALLASJON' } else { 'INSTALLASJON' }) starter ==="
+Write-Log "Kjorer som: $env:USERNAME | Maskin: $env:COMPUTERNAME"
 
 # ------------------------------------------------------------------------------
 # AVINSTALLASJON
@@ -279,15 +268,14 @@ if ($Uninstall) {
     }
 
     Write-Log "Rydder registry..."
-    $runPaths = @(
+    @(
         "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
         "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
         "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run"
-    )
-    foreach ($regPath in $runPaths) {
-        if (Test-Path $regPath) {
+    ) | ForEach-Object {
+        if (Test-Path $_) {
             @("Netbird", "NetbirdUI", "netbird-ui", "NetRelay") | ForEach-Object {
-                Remove-ItemProperty -Path $regPath -Name $_ -ErrorAction SilentlyContinue
+                Remove-ItemProperty -Path $_ -Name $_ -ErrorAction SilentlyContinue
             }
         }
     }
@@ -296,7 +284,7 @@ if ($Uninstall) {
     Remove-NetFirewallRule -DisplayName "*NetBird*"  -ErrorAction SilentlyContinue
     Remove-NetFirewallRule -DisplayName "*NetRelay*" -ErrorAction SilentlyContinue
 
-    Write-Log "=== Avinstallasjon fullført ==="
+    Write-Log "=== Avinstallasjon fullfort ==="
     Write-Host ""
     Write-Host "  $ServiceDisplayName er fullstendig avinstallert." -ForegroundColor Green
     Write-Host "  Merk: OpenSSH og RDP er beholdt (OS-funksjoner)." -ForegroundColor DarkGray
@@ -335,21 +323,20 @@ $Arch = Get-Architecture
 Write-Log "Arkitektur: $Arch"
 
 if ($NetbirdVersion -eq "latest") { $NetbirdVersion = Get-LatestNetbirdVersion }
-Write-Log "Målversjon: $NetbirdVersion"
+Write-Log "Malversjon: $NetbirdVersion"
 
 # ------------------------------------------------------------------------------
-# OPPDATERINGSSJEKK – hopp over om allerede oppdatert
+# OPPDATERINGSSJEKK
 # ------------------------------------------------------------------------------
 if ($UpdateOnly) {
     $installedVer = Get-InstalledNetbirdVersion
     Write-Log "Installert  : $(if ($installedVer) { $installedVer } else { 'ikke funnet' })"
     Write-Log "Tilgjengelig: $NetbirdVersion"
-
     if ($installedVer -eq $NetbirdVersion) {
         Write-Log "$ServiceDisplayName er allerede oppdatert ($NetbirdVersion). Avslutter."
         exit 0
     }
-    Write-Log "Oppdatering tilgjengelig – fortsetter..."
+    Write-Log "Oppdatering tilgjengelig - fortsetter..."
 }
 
 # ------------------------------------------------------------------------------
@@ -363,7 +350,7 @@ Write-Log "Laster ned: $DownloadUrl"
 try {
     $ProgressPreference = 'SilentlyContinue'
     Invoke-WebRequest -Uri $DownloadUrl -OutFile $MsiPath -UseBasicParsing
-    Write-Log "Nedlasting fullført."
+    Write-Log "Nedlasting fullfort."
 } catch {
     Write-Log "Nedlasting feilet: $_" "ERROR"
     exit 1
@@ -390,23 +377,23 @@ $proc     = Start-Process "msiexec.exe" -ArgumentList $MsiArgs -Wait -PassThru -
 $exitCode = $proc.ExitCode
 
 if ($exitCode -eq 0) {
-    Write-Log "Installasjon fullført (exit: $exitCode)"
+    Write-Log "Installasjon fullfort (exit: $exitCode)"
 } elseif ($exitCode -eq 3010) {
-    Write-Log "Installasjon fullført – restart anbefales (exit: 3010)" "WARN"
+    Write-Log "Installasjon fullfort - restart anbefales (exit: 3010)" "WARN"
 } else {
     Write-Log "Installasjon feilet (exit: $exitCode). Se: $MsiLog" "ERROR"
     exit $exitCode
 }
 
 # ------------------------------------------------------------------------------
-# KOPIER BINÆRFILER TIL TILPASSET MAPPE
+# KOPIER BINARFILER TIL TILPASSET MAPPE
 # ------------------------------------------------------------------------------
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 }
 $defaultInstall = "$env:ProgramFiles\Netbird"
 if (Test-Path "$defaultInstall\netbird.exe") {
-    Write-Log "Kopierer binærfiler til $InstallDir..."
+    Write-Log "Kopierer binarfiler til $InstallDir..."
     Copy-Item "$defaultInstall\*" -Destination $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
@@ -416,10 +403,10 @@ if (-not (Test-Path $NetbirdExe)) {
     Write-Log "netbird.exe ikke funnet etter installasjon." "ERROR"
     exit 1
 }
-Write-Log "Bruker binær: $NetbirdExe"
+Write-Log "Bruker binar: $NetbirdExe"
 
 # ------------------------------------------------------------------------------
-# REGISTRER SETUP KEY (kun ved ny installasjon)
+# REGISTRER SETUP KEY
 # ------------------------------------------------------------------------------
 if (-not $UpdateOnly) {
     Write-Log "Registrerer med setup key..."
@@ -442,9 +429,7 @@ if ($UpdateOnly) { Invoke-Remasking }
 # AKTIVER NETBIRD SSH
 # ------------------------------------------------------------------------------
 Write-Log "Aktiverer NetBird SSH..."
-$sshProc = Start-Process $NetbirdExe `
-    -ArgumentList "ssh --allow-connections" `
-    -Wait -PassThru -WindowStyle Hidden -ErrorAction SilentlyContinue
+$sshProc = Start-Process $NetbirdExe -ArgumentList "ssh --allow-connections" -Wait -PassThru -WindowStyle Hidden -ErrorAction SilentlyContinue
 if (-not $sshProc -or $sshProc.ExitCode -ne 0) {
     Start-Process $NetbirdExe -ArgumentList "up --allow-server-ssh" -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue
 }
@@ -493,29 +478,28 @@ $fwRDP = Get-NetFirewallRule -DisplayName "*Remote Desktop*" -ErrorAction Silent
     Where-Object { $_.Direction -eq "Inbound" -and $_.Enabled -eq "True" }
 if (-not $fwRDP) {
     Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-    Write-Log "Brannmurregler for RDP aktivert."
 }
 Write-Log "RDP aktivert med NLA."
 
 # ------------------------------------------------------------------------------
-# MASKERING – PROSESSNAVN (Task Manager)
+# MASKERING - PROSESSNAVN (Task Manager)
 # ------------------------------------------------------------------------------
 Write-Log "Maskerer prosessnavn i Task Manager..."
-$MaskedExe      = "$InstallDir\netrelay.exe"
-$sourceExe      = "$InstallDir\netbird.exe"
+$MaskedExe = "$InstallDir\netrelay.exe"
+$sourceExe = "$InstallDir\netbird.exe"
 if (-not (Test-Path $sourceExe)) { $sourceExe = "$env:ProgramFiles\Netbird\netbird.exe" }
 if (Test-Path $sourceExe) {
     Stop-NetbirdProcesses
     Copy-Item $sourceExe -Destination $MaskedExe -Force -ErrorAction SilentlyContinue
     Write-Log "Prosess vil vises som 'netrelay' i Task Manager."
 } else {
-    Write-Log "Kunne ikke finne netbird.exe for omdøping." "WARN"
+    Write-Log "Kunne ikke finne netbird.exe for omdoping." "WARN"
 }
 
 # ------------------------------------------------------------------------------
-# MASKERING – INSTALLERTE APPLIKASJONER
+# MASKERING - INSTALLERTE APPLIKASJONER
 # ------------------------------------------------------------------------------
-Write-Log "Maskerer oppføring under Installerte applikasjoner..."
+Write-Log "Maskerer oppforing under Installerte applikasjoner..."
 $uninstallRoots = @(
     "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
     "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
@@ -528,13 +512,13 @@ foreach ($root in $uninstallRoots) {
             Set-ItemProperty -Path $_.PSPath -Name "Publisher"       -Value "5echo.io"           -Force
             Set-ItemProperty -Path $_.PSPath -Name "DisplayIcon"     -Value $MaskedExe           -Force -ErrorAction SilentlyContinue
             Set-ItemProperty -Path $_.PSPath -Name "InstallLocation" -Value $InstallDir          -Force -ErrorAction SilentlyContinue
-            Write-Log "App-oppføring maskert: $($_.PSPath)"
+            Write-Log "App-oppforing maskert: $($_.PSPath)"
         }
     }
 }
 
 # ------------------------------------------------------------------------------
-# MASKERING – WINDOWS SERVICE
+# MASKERING - WINDOWS SERVICE
 # ------------------------------------------------------------------------------
 Write-Log "Maskerer Windows Service..."
 Set-ServiceMasking
@@ -559,7 +543,7 @@ Get-Process -Name "netbird-ui" -ErrorAction SilentlyContinue | Stop-Process -For
 Write-Log "Taskbar-ikon deaktivert."
 
 # ------------------------------------------------------------------------------
-# OPPRETT SCHEDULED TASK – AUTOMATISK OPPDATERING
+# OPPRETT SCHEDULED TASK - AUTOMATISK OPPDATERING
 # ------------------------------------------------------------------------------
 Write-Log "Oppretter Scheduled Task for automatisk oppdatering..."
 
@@ -571,7 +555,7 @@ if ($localScriptPath -and (Test-Path $localScriptPath)) {
     Copy-Item $localScriptPath -Destination $scriptDestination -Force
     Write-Log "Script kopiert til $scriptDestination"
 } else {
-    Write-Log "Ingen lokal fil – laster ned fra $ScriptPublicUrl..."
+    Write-Log "Ingen lokal fil - laster ned fra $ScriptPublicUrl..."
     try {
         $ProgressPreference = 'SilentlyContinue'
         Invoke-WebRequest -Uri $ScriptPublicUrl -OutFile $scriptDestination -UseBasicParsing
@@ -581,35 +565,19 @@ if ($localScriptPath -and (Test-Path $localScriptPath)) {
     }
 }
 
-$taskAction = New-ScheduledTaskAction `
-    -Execute "powershell.exe" `
+$taskAction    = New-ScheduledTaskAction -Execute "powershell.exe" `
     -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptDestination`" -ElevatedRun -UpdateOnly"
-
-$triggerDaily        = New-ScheduledTaskTrigger -Daily -At "03:00"
-$triggerBoot         = New-ScheduledTaskTrigger -AtStartup
-$triggerBoot.Delay   = "PT3M"
-
-$taskSettings = New-ScheduledTaskSettingsSet `
-    -Hidden `
-    -RunOnlyIfNetworkAvailable `
-    -StartWhenAvailable `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 30) `
-    -MultipleInstances IgnoreNew
-
-$taskPrincipal = New-ScheduledTaskPrincipal `
-    -UserId "SYSTEM" `
-    -LogonType ServiceAccount `
-    -RunLevel Highest
+$triggerDaily  = New-ScheduledTaskTrigger -Daily -At "03:00"
+$triggerBoot   = New-ScheduledTaskTrigger -AtStartup
+$triggerBoot.Delay = "PT3M"
+$taskSettings  = New-ScheduledTaskSettingsSet -Hidden -RunOnlyIfNetworkAvailable -StartWhenAvailable `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
+$taskPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 
 Unregister-ScheduledTask -TaskName $UpdateTaskName -Confirm:$false -ErrorAction SilentlyContinue
-
-Register-ScheduledTask `
-    -TaskName $UpdateTaskName `
-    -Action $taskAction `
-    -Trigger @($triggerDaily, $triggerBoot) `
-    -Settings $taskSettings `
-    -Principal $taskPrincipal `
-    -Description "$ServiceDisplayName – daglig automatisk oppdatering" | Out-Null
+Register-ScheduledTask -TaskName $UpdateTaskName -Action $taskAction `
+    -Trigger @($triggerDaily, $triggerBoot) -Settings $taskSettings -Principal $taskPrincipal `
+    -Description "$ServiceDisplayName - daglig automatisk oppdatering" | Out-Null
 
 Write-Log "Scheduled Task '$UpdateTaskName' opprettet (daglig kl. 03:00 + ved oppstart)."
 
@@ -622,13 +590,13 @@ Remove-Item $MsiPath -ErrorAction SilentlyContinue
 # ------------------------------------------------------------------------------
 # FERDIG
 # ------------------------------------------------------------------------------
-Write-Log "=== $ServiceDisplayName $(if ($UpdateOnly) { 'oppdatering' } else { 'installasjon' }) fullført ==="
+Write-Log "=== $ServiceDisplayName $(if ($UpdateOnly) { 'oppdatering' } else { 'installasjon' }) fullfort ==="
 Write-Host ""
 Write-Host "  $ServiceDisplayName er klar." -ForegroundColor Green
 Write-Host ""
 Write-Host "  NetBird SSH   : Aktivert" -ForegroundColor Cyan
 Write-Host "  Windows SSH   : Aktivert (port 22)" -ForegroundColor Cyan
-Write-Host "  RDP           : Aktivert (port 3389, NLA på)" -ForegroundColor Cyan
+Write-Host "  RDP           : Aktivert (port 3389, NLA pa)" -ForegroundColor Cyan
 Write-Host "  Taskbar-ikon  : Deaktivert" -ForegroundColor Cyan
 Write-Host "  Auto-update   : Daglig kl. 03:00 + ved oppstart" -ForegroundColor Cyan
 Write-Host "  Logg          : $LogFile" -ForegroundColor DarkGray
