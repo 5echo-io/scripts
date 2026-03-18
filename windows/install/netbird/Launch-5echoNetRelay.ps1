@@ -4,7 +4,9 @@
 # Løser problemet med $MyInvocation ved kjøring via iex/irm
 #
 # BRUK (én kommando i PowerShell):
-#   irm "https://scripts.5echo.io/windows/install/netbird/Launch-5echoNetRelay.ps1" | iex
+#    irm "https://scripts.5echo.io/windows/install/netbird/Launch-5echoNetRelay.ps1" | iex
+# Fra CMD:
+#    powershell -ExecutionPolicy Bypass -Command "irm 'https://scripts.5echo.io/windows/install/netbird/Launch-5echoNetRelay.ps1' | iex"
 # ==============================================================================
 
 $ScriptUrl  = "https://scripts.5echo.io/windows/install/netbird/5echo-NetRelay.ps1"
