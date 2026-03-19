@@ -680,12 +680,12 @@ if (-not $UpdateOnly) {
         & $NetbirdExe down 2>&1 | Out-Null
         Start-Sleep -Seconds 3
 
-        # Run netbird up with setup key via Start-Process.
-        # No output redirection - preserves local gRPC communication with daemon.
-        $upProc = Start-Process -FilePath $NetbirdExe `
-            -ArgumentList "up --setup-key $SetupKey" `
-            -Wait -PassThru -WindowStyle Hidden
-        Write-Log "netbird up exit code: $($upProc.ExitCode)"
+        # Run netbird up using the call operator (&).
+        # This correctly parses arguments and preserves gRPC communication.
+        # Runs synchronously - blocks until netbird up completes or times out.
+        Write-Log "Running: netbird up --setup-key [key]"
+        & $NetbirdExe up --setup-key $SetupKey
+        Write-Log "netbird up completed."
 
         # Give daemon time to register and connect
         Start-Sleep -Seconds 8
@@ -702,9 +702,7 @@ if (-not $UpdateOnly) {
             Write-Log "LoginFailed detected - retrying netbird up" "WARN"
 
             # Retry once
-            Start-Process -FilePath $NetbirdExe `
-                -ArgumentList "up --setup-key $SetupKey" `
-                -Wait -WindowStyle Hidden
+            & $NetbirdExe up --setup-key $SetupKey
             Start-Sleep -Seconds 10
 
             $statusOutput2 = & $NetbirdExe status 2>&1
