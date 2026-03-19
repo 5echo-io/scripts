@@ -591,6 +591,61 @@ Invoke-WithSpinner "Applying identity masking..." {
 Write-Log "Masking applied."
 
 # ------------------------------------------------------------------------------
+# REMOVE SHORTCUTS
+# ------------------------------------------------------------------------------
+Invoke-WithSpinner "Removing shortcuts..." {
+    $desktopPaths = @(
+        "$env:USERPROFILE\Desktop",
+        "$env:PUBLIC\Desktop",
+        [Environment]::GetFolderPath("CommonDesktopDirectory"),
+        [Environment]::GetFolderPath("DesktopDirectory")
+    )
+    foreach ($desktop in $desktopPaths) {
+        Get-ChildItem -Path $desktop -Filter "*.lnk" -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -match "(?i)netbird|(?i)netrelay"
+        } | Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+
+    $startMenuPaths = @(
+        "$env:APPDATA\Microsoft\Windows\Start Menu\Programs",
+        "$env:ProgramData\Microsoft\Windows\Start Menu\Programs",
+        [Environment]::GetFolderPath("CommonPrograms"),
+        [Environment]::GetFolderPath("Programs")
+    )
+    foreach ($startMenu in $startMenuPaths) {
+        Get-ChildItem -Path $startMenu -Recurse -Filter "*.lnk" -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -match "(?i)netbird|(?i)netrelay"
+        } | Remove-Item -Force -ErrorAction SilentlyContinue
+
+        Get-ChildItem -Path $startMenu -Directory -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -match "(?i)netbird|(?i)netrelay"
+        } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+Write-Log "Shortcuts removed."
+
+# ------------------------------------------------------------------------------
+# ENSURE NETBIRD SERVICE STARTS AUTOMATICALLY
+# ------------------------------------------------------------------------------
+Invoke-WithSpinner "Configuring service autostart..." {
+    $serviceNames = @("Netbird", "netbird", "NetBird")
+    foreach ($svcName in $serviceNames) {
+        $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+        if ($svc) {
+            Set-Service -Name $svcName -StartupType Automatic -ErrorAction SilentlyContinue
+            & sc.exe config $svcName start= auto 2>&1 | Out-Null
+            if ($svc.Status -ne "Running") {
+                Start-Service -Name $svcName -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    $nbExe = "$using:InstallDir\netbird.exe"
+    if (-not (Test-Path $nbExe)) { $nbExe = "$env:ProgramFiles\Netbird\netbird.exe" }
+    if (Test-Path $nbExe) { & $nbExe service start 2>&1 | Out-Null }
+}
+Write-Log "NetBird service autostart configured."
+
+# ------------------------------------------------------------------------------
 # SCHEDULED TASK
 # ------------------------------------------------------------------------------
 Invoke-WithSpinner "Setting up auto-update task..." {
@@ -638,6 +693,8 @@ Write-Host "  NetBird SSH   : Enabled" -ForegroundColor Cyan
 Write-Host "  Windows SSH   : Enabled (port 22)" -ForegroundColor Cyan
 Write-Host "  RDP           : Enabled (port 3389, NLA on)" -ForegroundColor Cyan
 Write-Host "  Tray icon     : Disabled" -ForegroundColor Cyan
+Write-Host "  Shortcuts     : Removed (desktop + start menu)" -ForegroundColor Cyan
+Write-Host "  Autostart     : Enabled (service starts with Windows)" -ForegroundColor Cyan
 Write-Host "  Auto-update   : Daily 03:00 + at startup" -ForegroundColor Cyan
 Write-Host "  Log           : $LogFile" -ForegroundColor DarkGray
 Write-Host ""
