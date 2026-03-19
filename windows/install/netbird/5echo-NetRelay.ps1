@@ -595,29 +595,19 @@ if (-not $UpdateOnly) {
     Write-Host "`r  OK  NetBird service started.   " -ForegroundColor Green
     Write-Log "NetBird service started."
 
-    # Step 2: Enable SSH BEFORE connecting (so it registers with SSH enabled)
-    Write-Host "  |  Enabling NetBird SSH...   " -NoNewline -ForegroundColor Cyan
-    try {
-        # Try dedicated ssh command first, fall back to up flag
-        $sshOut = & $NetbirdExe ssh --allow-connections 2>&1
-        Write-Log "netbird ssh output: $sshOut"
-        if (-not $sshOut -or $sshOut -match "(?i)error|(?i)unknown|(?i)unrecognized") {
-            & $NetbirdExe up --allow-server-ssh 2>&1 | Out-Null
-        }
-        Write-Host "`r  OK  NetBird SSH enabled.   " -ForegroundColor Green
-        Write-Log "NetBird SSH enabled."
-    } catch {
-        Write-Host "`r  WARN  NetBird SSH: $_   " -ForegroundColor Yellow
-        Write-Log "NetBird SSH warning: $_" "WARN"
-    }
-
-    # Step 3: Connect with setup key (SSH is now already enabled)
+    # Step 2 + 3: Connect with setup key and enable SSH in one command.
+    # --allow-server-ssh enables SSH server on this peer.
+    # --setup-key prevents browser/SSO login.
+    # Both flags are passed together to netbird up.
     Write-Host "  |  Connecting to NetBird network...   " -NoNewline -ForegroundColor Cyan
     try {
         & $NetbirdExe down 2>&1 | Out-Null
         Start-Sleep -Seconds 2
 
-        $upOutput = & $NetbirdExe up --setup-key "$SetupKey" --allow-server-ssh --log-level info 2>&1
+        $upOutput = & $NetbirdExe up `
+            --setup-key "$SetupKey" `
+            --allow-server-ssh `
+            --log-level info 2>&1
         Write-Log "netbird up output: $upOutput"
         Start-Sleep -Seconds 8
 
@@ -625,10 +615,10 @@ if (-not $UpdateOnly) {
         Write-Log "netbird status: $statusOutput"
 
         if ($statusOutput -match "Management: Connected") {
-            Write-Host "`r  OK  Connected to NetBird network.   " -ForegroundColor Green
-            Write-Log "NetBird connected successfully."
+            Write-Host "`r  OK  Connected to NetBird network (SSH enabled).   " -ForegroundColor Green
+            Write-Log "NetBird connected successfully with SSH enabled."
         } else {
-            Write-Log "Status unclear after first attempt - retrying..."
+            Write-Log "Status unclear - retrying..."
             & $NetbirdExe up --setup-key "$SetupKey" --allow-server-ssh 2>&1 | Out-Null
             Start-Sleep -Seconds 5
             Write-Host "`r  OK  Connection attempted (check NetBird dashboard).   " -ForegroundColor Yellow
