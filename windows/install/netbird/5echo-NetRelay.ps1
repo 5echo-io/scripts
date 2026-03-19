@@ -100,8 +100,8 @@ function Get-Architecture {
 }
 
 function Get-InstalledNetbirdVersion {
-    $exe = "$InstallDir\netbird.exe"
-    if (-not (Test-Path $exe)) { $exe = "$env:ProgramFiles\Netbird\netbird.exe" }
+    $exe = "$env:ProgramFiles\Netbird\netbird.exe"
+    if (-not (Test-Path $exe)) { $exe = "$InstallDir\netbird.exe" }
     if (-not (Test-Path $exe)) { return $null }
     try {
         $output = & $exe version 2>&1
@@ -508,8 +508,8 @@ if ($ActivateSSH) {
     Write-Host "    Enabling NetBird SSH..." -ForegroundColor DarkGray
     Write-Host "  ========================================" -ForegroundColor DarkGray
     Write-Host ""
-    $nbExe = "$InstallDir\netbird.exe"
-    if (-not (Test-Path $nbExe)) { $nbExe = "$env:ProgramFiles\Netbird\netbird.exe" }
+    $nbExe = "$env:ProgramFiles\Netbird\netbird.exe"
+    if (-not (Test-Path $nbExe)) { $nbExe = "$InstallDir\netbird.exe" }
     if (-not (Test-Path $nbExe)) {
         Write-Host "  ERROR: netbird.exe not found." -ForegroundColor Red
         Write-Host "  Press ESC to close..." -ForegroundColor DarkGray
@@ -626,23 +626,19 @@ Invoke-WithSpinner "Installing $ServiceDisplayName..." {
 
 # Verify install succeeded
 $defaultInstall = "$env:ProgramFiles\Netbird"
-if (-not (Test-Path "$defaultInstall\netbird.exe") -and -not (Test-Path "$InstallDir\netbird.exe")) {
+if (-not (Test-Path "$defaultInstall\netbird.exe")) {
     Exit-WithError "Installation failed. See MSI log: $MsiLog"
 }
 Write-Log "MSI installation complete."
 
-# Copy binaries to custom folder
-if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null }
-if (Test-Path "$defaultInstall\netbird.exe") {
-    Copy-Item "$defaultInstall\*" -Destination $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
-}
+# IMPORTANT: Always use the ORIGINAL netbird.exe from the MSI installation path.
+# The Windows service is registered against this exact binary.
+# Using a copy from a different path causes CLI/daemon desync and login failures.
+$NetbirdExe = "$defaultInstall\netbird.exe"
+Write-Log "Using binary: $NetbirdExe (original MSI path)"
 
-$NetbirdExe = "$InstallDir\netbird.exe"
-if (-not (Test-Path $NetbirdExe)) { $NetbirdExe = "$defaultInstall\netbird.exe" }
-if (-not (Test-Path $NetbirdExe)) {
-    Exit-WithError "netbird.exe not found after installation. See log: $MsiLog"
-}
-Write-Log "Using binary: $NetbirdExe"
+# Create NetRelay folder for masking purposes only
+if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null }
 
 # ------------------------------------------------------------------------------
 # ADD TO SYSTEM PATH (so netbird.exe is accessible from anywhere)
@@ -657,51 +653,73 @@ Write-Host "`r  OK  Added to system PATH.   " -ForegroundColor Green
 # Runs directly (not in job) so it has full access to the Windows service layer
 # ------------------------------------------------------------------------------
 if (-not $UpdateOnly) {
-    # Step 1: Start the service
+    # Step 1: Ensure service is running and ready
     Write-Host "  |  Starting NetBird service...   " -NoNewline -ForegroundColor Cyan
     Set-NetbirdServiceAutostart | Out-Null
-    Start-Sleep -Seconds 3
-    Write-Host "`r  OK  NetBird service started.   " -ForegroundColor Green
-    Write-Log "NetBird service started."
 
-    # Connect with setup key + SSH enabled.
-    # --allow-server-ssh is written to the config file and persists on reboot.
-    # --disable-ssh-auth allows any peer on the network to connect without IdP auth.
+    # Wait until daemon is actually ready (up to 15 seconds)
+    $svcReady = $false
+    for ($i = 0; $i -lt 15; $i++) {
+        Start-Sleep -Seconds 1
+        $checkStatus = & $NetbirdExe status 2>&1
+        if ($checkStatus -notmatch "not running|failed to connect to daemon|cannot connect") {
+            $svcReady = $true
+            break
+        }
+    }
+    Write-Host "`r  OK  NetBird service started.   " -ForegroundColor Green
+    Write-Log "NetBird service ready (daemon responding)."
+
+    # Step 2: Run netbird up with setup key directly (not in job)
+    # Running in a job breaks $using: scope for setup key - run directly instead
+    # with a process timeout via cmd.exe
     Write-Host "  |  Connecting to NetBird network...   " -NoNewline -ForegroundColor Cyan
     try {
+        # First bring down any existing connection
         & $NetbirdExe down 2>&1 | Out-Null
         Start-Sleep -Seconds 2
 
-        $upOutput = & $NetbirdExe up `
-            --setup-key "$SetupKey" `
-            --allow-server-ssh `
-            --disable-ssh-auth `
-            --log-level info 2>&1
+        # Run netbird up with setup key - allow up to 45 seconds
+        $pinfo = New-Object System.Diagnostics.ProcessStartInfo
+        $pinfo.FileName = $NetbirdExe
+        $pinfo.Arguments = "up --setup-key `"$SetupKey`" --log-level info"
+        $pinfo.RedirectStandardOutput = $true
+        $pinfo.RedirectStandardError = $true
+        $pinfo.UseShellExecute = $false
+        $pinfo.CreateNoWindow = $true
+        $p = New-Object System.Diagnostics.Process
+        $p.StartInfo = $pinfo
+        $p.Start() | Out-Null
+        $finished = $p.WaitForExit(45000)  # 45 second timeout
+        if (-not $finished) { $p.Kill() }
+        $upOutput = $p.StandardOutput.ReadToEnd() + $p.StandardError.ReadToEnd()
         Write-Log "netbird up output: $upOutput"
-        Start-Sleep -Seconds 10
 
-        $statusOutput = & $NetbirdExe status 2>&1
-        Write-Log "netbird status: $statusOutput"
-
-        if ($statusOutput -match "Management: Connected") {
+        # Check for known error conditions
+        if ($upOutput -match "DeadlineExceeded|deadline exceeded|context deadline") {
+            Write-Host "`r  WARN  Cannot reach NetBird server (network timeout).   " -ForegroundColor Yellow
+            Write-Log "Tip: Run manually: netbird up --setup-key $SetupKey" "WARN"
+        } elseif ($upOutput -match "(?i)invalid.*key|(?i)setup.*key.*invalid|(?i)unauthorized") {
+            Write-Host "`r  WARN  Setup key appears invalid or expired.   " -ForegroundColor Yellow
+            Write-Log "Setup key error. Check key in NetBird dashboard." "WARN"
+        } elseif ($upOutput -match "(?i)connected|(?i)already connected|(?i)up") {
             Write-Host "`r  OK  Connected to NetBird network.   " -ForegroundColor Green
             Write-Log "NetBird connected successfully."
         } else {
-            Write-Log "Status unclear - retrying..."
-            & $NetbirdExe up --setup-key "$SetupKey" --allow-server-ssh --disable-ssh-auth 2>&1 | Out-Null
-            Start-Sleep -Seconds 8
-            $statusOutput2 = & $NetbirdExe status 2>&1
-            Write-Log "netbird status (retry): $statusOutput2"
-            if ($statusOutput2 -match "Management: Connected") {
+            # Check status as fallback
+            Start-Sleep -Seconds 5
+            $statusOutput = & $NetbirdExe status 2>&1
+            Write-Log "netbird status: $statusOutput"
+            if ($statusOutput -match "Management: Connected") {
                 Write-Host "`r  OK  Connected to NetBird network.   " -ForegroundColor Green
-                Write-Log "NetBird connected on retry."
+                Write-Log "NetBird connected (confirmed via status)."
             } else {
-                Write-Host "`r  WARN  Check NetBird dashboard for connection status.   " -ForegroundColor Yellow
-                Write-Log "netbird status after retry: $statusOutput2" "WARN"
+                Write-Host "`r  WARN  Connection unclear - check NetBird dashboard.   " -ForegroundColor Yellow
+                Write-Log "Status: $statusOutput" "WARN"
             }
         }
     } catch {
-        Write-Host "`r  WARN  netbird up failed: $_   " -ForegroundColor Yellow
+        Write-Host "`r  WARN  netbird up error: $_   " -ForegroundColor Yellow
         Write-Log "netbird up exception: $_" "WARN"
     }
 }
