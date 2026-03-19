@@ -51,7 +51,7 @@ function Exit-WithError {
     Write-Log $Message "ERROR"
     Write-Host "  Log saved to: $LogFile" -ForegroundColor DarkGray
     Write-Host ""
-    Write-Host "  Press ESC to close..." -ForegroundColor DarkGray
+    Write-Host "  Press ENTER to close..." -ForegroundColor DarkGray
     do { $k = [Console]::ReadKey($true) } while ($k.Key -ne [ConsoleKey]::Escape -and $k.Key -ne [ConsoleKey]::Enter)
 Read-Host | Out-Null
     exit 1
@@ -344,7 +344,7 @@ if (-not $UpdateOnly -and -not $Uninstall -and -not $ElevatedRun) {
             exit
         } else {
             Write-Host "  Cancelled." -ForegroundColor Gray
-            Write-Host "  Press ESC to close..." -ForegroundColor DarkGray
+            Write-Host "  Press ENTER to close..." -ForegroundColor DarkGray
     do { $k = [Console]::ReadKey($true) } while ($k.Key -ne [ConsoleKey]::Escape -and $k.Key -ne [ConsoleKey]::Enter)
 Read-Host | Out-Null
             exit 0
@@ -362,7 +362,7 @@ if (-not (Test-IsAdmin)) {
         $setupKeyInput = (Read-Host "  Enter $ServiceDisplayName Setup Key").Trim()
         if ([string]::IsNullOrEmpty($setupKeyInput)) {
             Write-Host "  [ERROR] No setup key provided. Aborting." -ForegroundColor Red
-            Write-Host "  Press ESC to close..." -ForegroundColor DarkGray
+            Write-Host "  Press ENTER to close..." -ForegroundColor DarkGray
     do { $k = [Console]::ReadKey($true) } while ($k.Key -ne [ConsoleKey]::Escape -and $k.Key -ne [ConsoleKey]::Enter)
 Read-Host | Out-Null
             exit 1
@@ -459,7 +459,7 @@ if ($Uninstall) {
     Write-Host "  Note: OpenSSH and RDP have been kept (OS features)." -ForegroundColor DarkGray
     Write-Host "  Log: $LogFile" -ForegroundColor DarkGray
     Write-Host ""
-    Write-Host "  Press ESC to close..." -ForegroundColor DarkGray
+    Write-Host "  Press ENTER to close..." -ForegroundColor DarkGray
     do { $k = [Console]::ReadKey($true) } while ($k.Key -ne [ConsoleKey]::Escape -and $k.Key -ne [ConsoleKey]::Enter)
 Read-Host | Out-Null
     exit 0
@@ -583,36 +583,53 @@ Set-SystemPath
 Write-Host "`r  OK  Added to system PATH.   " -ForegroundColor Green
 
 # ------------------------------------------------------------------------------
-# START NETBIRD SERVICE + REGISTER SETUP KEY
+# START NETBIRD SERVICE + ENABLE SSH + CONNECT
+# Order matters: service first, then SSH flag, then up with setup key
 # Runs directly (not in job) so it has full access to the Windows service layer
 # ------------------------------------------------------------------------------
 if (-not $UpdateOnly) {
+    # Step 1: Start the service
     Write-Host "  |  Starting NetBird service...   " -NoNewline -ForegroundColor Cyan
-    $svcStarted = Set-NetbirdServiceAutostart
+    Set-NetbirdServiceAutostart | Out-Null
     Start-Sleep -Seconds 3
     Write-Host "`r  OK  NetBird service started.   " -ForegroundColor Green
     Write-Log "NetBird service started."
 
+    # Step 2: Enable SSH BEFORE connecting (so it registers with SSH enabled)
+    Write-Host "  |  Enabling NetBird SSH...   " -NoNewline -ForegroundColor Cyan
+    try {
+        # Try dedicated ssh command first, fall back to up flag
+        $sshOut = & $NetbirdExe ssh --allow-connections 2>&1
+        Write-Log "netbird ssh output: $sshOut"
+        if (-not $sshOut -or $sshOut -match "(?i)error|(?i)unknown|(?i)unrecognized") {
+            & $NetbirdExe up --allow-server-ssh 2>&1 | Out-Null
+        }
+        Write-Host "`r  OK  NetBird SSH enabled.   " -ForegroundColor Green
+        Write-Log "NetBird SSH enabled."
+    } catch {
+        Write-Host "`r  WARN  NetBird SSH: $_   " -ForegroundColor Yellow
+        Write-Log "NetBird SSH warning: $_" "WARN"
+    }
+
+    # Step 3: Connect with setup key (SSH is now already enabled)
     Write-Host "  |  Connecting to NetBird network...   " -NoNewline -ForegroundColor Cyan
     try {
-        # Disconnect first to ensure clean state
         & $NetbirdExe down 2>&1 | Out-Null
         Start-Sleep -Seconds 2
 
-        $upOutput = & $NetbirdExe up --setup-key "$SetupKey" --log-level info 2>&1
+        $upOutput = & $NetbirdExe up --setup-key "$SetupKey" --allow-server-ssh --log-level info 2>&1
         Write-Log "netbird up output: $upOutput"
         Start-Sleep -Seconds 8
 
-        # Check status
         $statusOutput = & $NetbirdExe status 2>&1
         Write-Log "netbird status: $statusOutput"
 
         if ($statusOutput -match "Management: Connected") {
+            Write-Host "`r  OK  Connected to NetBird network.   " -ForegroundColor Green
             Write-Log "NetBird connected successfully."
         } else {
-            # Retry once
-            Write-Log "First connection attempt unclear - retrying..."
-            & $NetbirdExe up --setup-key "$SetupKey" 2>&1 | Out-Null
+            Write-Log "Status unclear after first attempt - retrying..."
+            & $NetbirdExe up --setup-key "$SetupKey" --allow-server-ssh 2>&1 | Out-Null
             Start-Sleep -Seconds 5
             Write-Host "`r  OK  Connection attempted (check NetBird dashboard).   " -ForegroundColor Yellow
         }
@@ -632,22 +649,6 @@ if ($UpdateOnly) {
     if (-not (Test-Path $SourceExe)) { $SourceExe = "$defaultInstall\netbird.exe" }
     Apply-Masking -MaskedExe $MaskedExe -SourceExe $SourceExe
     Set-NetbirdServiceAutostart | Out-Null
-}
-
-# ------------------------------------------------------------------------------
-# ENABLE NETBIRD SSH (runs directly - needs service context)
-# ------------------------------------------------------------------------------
-Write-Host "  |  Enabling NetBird SSH...   " -NoNewline -ForegroundColor Cyan
-try {
-    $sshOut = & $NetbirdExe ssh --allow-connections 2>&1
-    if (-not $sshOut -or $sshOut -match "(?i)error|(?i)unknown") {
-        & $NetbirdExe up --allow-server-ssh 2>&1 | Out-Null
-    }
-    Write-Host "`r  OK  NetBird SSH enabled.   " -ForegroundColor Green
-    Write-Log "NetBird SSH enabled."
-} catch {
-    Write-Host "`r  WARN  NetBird SSH: $_   " -ForegroundColor Yellow
-    Write-Log "NetBird SSH warning: $_" "WARN"
 }
 
 # ------------------------------------------------------------------------------
@@ -773,6 +774,6 @@ Write-Host "  Autostart     : Enabled (starts with Windows)" -ForegroundColor Cy
 Write-Host "  Auto-update   : Daily 03:00 + at startup" -ForegroundColor Cyan
 Write-Host "  Log           : $LogFile" -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "  Press ESC to close..." -ForegroundColor DarkGray
+Write-Host "  Press ENTER to close..." -ForegroundColor DarkGray
     do { $k = [Console]::ReadKey($true) } while ($k.Key -ne [ConsoleKey]::Escape -and $k.Key -ne [ConsoleKey]::Enter)
 Read-Host | Out-Null
