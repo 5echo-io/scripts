@@ -52,7 +52,6 @@ function Exit-WithError {
     Write-Host "  Log saved to: $LogFile" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  Press ENTER to close..." -ForegroundColor DarkGray
-    do { $k = [Console]::ReadKey($true) } while ($k.Key -ne [ConsoleKey]::Escape -and $k.Key -ne [ConsoleKey]::Enter)
 Read-Host | Out-Null
     exit 1
 }
@@ -334,18 +333,34 @@ if (-not $UpdateOnly -and -not $Uninstall -and -not $ElevatedRun) {
         Write-Host ""
         $choice = (Read-Host "  Select [1-2]").Trim()
         if ($choice -eq "1") {
+            Write-Host ""
+            Write-Host "  Starting uninstall..." -ForegroundColor Cyan
+
+            # Get script path - may be empty if run via irm|iex, download if needed
             $scriptPath = $MyInvocation.MyCommand.Definition
-            $elevArgs   = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -Uninstall"
+            if ([string]::IsNullOrEmpty($scriptPath) -or -not (Test-Path $scriptPath)) {
+                Write-Host "  |  Downloading uninstaller...   " -NoNewline -ForegroundColor Cyan
+                $scriptPath = "$env:TEMP\5echo-NetRelay-Uninstall.ps1"
+                $ProgressPreference = "SilentlyContinue"
+                Invoke-WebRequest -Uri $ScriptPublicUrl -OutFile $scriptPath -UseBasicParsing
+                Write-Host "`r  OK  Uninstaller ready.          " -ForegroundColor Green
+            }
+
+            $elevArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -Uninstall"
             if (Test-IsAdmin) {
                 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$scriptPath" -Uninstall
             } else {
                 Start-Process powershell.exe -ArgumentList $elevArgs -Verb RunAs -Wait
             }
+
+            # Clean up temp file if we downloaded it
+            if ($scriptPath -match "Uninstall\.ps1$") {
+                Remove-Item $scriptPath -ErrorAction SilentlyContinue
+            }
             exit
         } else {
             Write-Host "  Cancelled." -ForegroundColor Gray
             Write-Host "  Press ENTER to close..." -ForegroundColor DarkGray
-    do { $k = [Console]::ReadKey($true) } while ($k.Key -ne [ConsoleKey]::Escape -and $k.Key -ne [ConsoleKey]::Enter)
 Read-Host | Out-Null
             exit 0
         }
@@ -363,7 +378,6 @@ if (-not (Test-IsAdmin)) {
         if ([string]::IsNullOrEmpty($setupKeyInput)) {
             Write-Host "  [ERROR] No setup key provided. Aborting." -ForegroundColor Red
             Write-Host "  Press ENTER to close..." -ForegroundColor DarkGray
-    do { $k = [Console]::ReadKey($true) } while ($k.Key -ne [ConsoleKey]::Escape -and $k.Key -ne [ConsoleKey]::Enter)
 Read-Host | Out-Null
             exit 1
         }
@@ -460,7 +474,6 @@ if ($Uninstall) {
     Write-Host "  Log: $LogFile" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  Press ENTER to close..." -ForegroundColor DarkGray
-    do { $k = [Console]::ReadKey($true) } while ($k.Key -ne [ConsoleKey]::Escape -and $k.Key -ne [ConsoleKey]::Enter)
 Read-Host | Out-Null
     exit 0
 }
@@ -765,5 +778,4 @@ Write-Host "  Auto-update   : Daily 03:00 + at startup" -ForegroundColor Cyan
 Write-Host "  Log           : $LogFile" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  Press ENTER to close..." -ForegroundColor DarkGray
-    do { $k = [Console]::ReadKey($true) } while ($k.Key -ne [ConsoleKey]::Escape -and $k.Key -ne [ConsoleKey]::Enter)
 Read-Host | Out-Null
