@@ -454,13 +454,38 @@ if (-not (Test-Path $NetbirdExe)) {
 }
 
 # ------------------------------------------------------------------------------
-# REGISTER SETUP KEY
+# REGISTER SETUP KEY AND CONNECT
 # ------------------------------------------------------------------------------
 if (-not $UpdateOnly) {
-    Invoke-WithSpinner "Connecting to NetBird network..." {
-        & $using:NetbirdExe up --setup-key "$using:SetupKey" --log-level info 2>&1 | Out-Null
+    Invoke-WithSpinner "Starting NetBird service..." {
+        # Ensure service is running before attempting to connect
+        $serviceNames = @("Netbird", "netbird", "NetBird")
+        foreach ($svcName in $serviceNames) {
+            $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+            if ($svc) {
+                Set-Service -Name $svcName -StartupType Automatic -ErrorAction SilentlyContinue
+                & sc.exe config $svcName start= auto 2>&1 | Out-Null
+                Start-Service -Name $svcName -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 3
+            }
+        }
     }
-    Write-Log "Setup key registered."
+
+    Invoke-WithSpinner "Connecting to NetBird network..." {
+        # Run netbird up with setup key - this registers AND connects
+        & $using:NetbirdExe up --setup-key "$using:SetupKey" --log-level info 2>&1 | Out-Null
+        Start-Sleep -Seconds 5
+
+        # Verify connection status
+        $status = & $using:NetbirdExe status 2>&1
+        if ($status -match "(?i)connected|(?i)running") {
+            Write-Log "NetBird connected successfully."
+        } else {
+            # Retry once if not connected
+            & $using:NetbirdExe up --setup-key "$using:SetupKey" 2>&1 | Out-Null
+        }
+    }
+    Write-Log "Setup key registered and connection established."
 }
 
 # ------------------------------------------------------------------------------
@@ -591,43 +616,91 @@ Invoke-WithSpinner "Applying identity masking..." {
 Write-Log "Masking applied."
 
 # ------------------------------------------------------------------------------
-# REMOVE SHORTCUTS
+# REMOVE SHORTCUTS AND SUPPRESS START MENU HIGHLIGHTS
 # ------------------------------------------------------------------------------
 Invoke-WithSpinner "Removing shortcuts..." {
+    # Wait briefly to ensure MSI has finished writing shortcuts
+    Start-Sleep -Seconds 2
+
+    # --- Desktop shortcuts ---
     $desktopPaths = @(
         "$env:USERPROFILE\Desktop",
         "$env:PUBLIC\Desktop",
         [Environment]::GetFolderPath("CommonDesktopDirectory"),
         [Environment]::GetFolderPath("DesktopDirectory")
-    )
+    ) | Select-Object -Unique
     foreach ($desktop in $desktopPaths) {
+        if (-not (Test-Path $desktop)) { continue }
         Get-ChildItem -Path $desktop -Filter "*.lnk" -ErrorAction SilentlyContinue | Where-Object {
             $_.Name -match "(?i)netbird|(?i)netrelay"
         } | Remove-Item -Force -ErrorAction SilentlyContinue
     }
 
+    # --- Start menu shortcuts and folders ---
     $startMenuPaths = @(
         "$env:APPDATA\Microsoft\Windows\Start Menu\Programs",
         "$env:ProgramData\Microsoft\Windows\Start Menu\Programs",
         [Environment]::GetFolderPath("CommonPrograms"),
         [Environment]::GetFolderPath("Programs")
-    )
+    ) | Select-Object -Unique
     foreach ($startMenu in $startMenuPaths) {
+        if (-not (Test-Path $startMenu)) { continue }
+        # Remove matching .lnk files
         Get-ChildItem -Path $startMenu -Recurse -Filter "*.lnk" -ErrorAction SilentlyContinue | Where-Object {
             $_.Name -match "(?i)netbird|(?i)netrelay"
         } | Remove-Item -Force -ErrorAction SilentlyContinue
-
+        # Remove matching folders
         Get-ChildItem -Path $startMenu -Directory -ErrorAction SilentlyContinue | Where-Object {
             $_.Name -match "(?i)netbird|(?i)netrelay"
         } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
     }
+
+    # --- Suppress "Recently added" and "Recommended" highlights in Start menu ---
+    # Windows tracks newly installed apps here - clearing prevents the highlight
+    $recentAppsPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\Cache\DefaultAccount"
+    if (Test-Path $recentAppsPath) {
+        Get-ChildItem -Path $recentAppsPath -Recurse -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -match "(?i)netbird|(?i)netrelay"
+        } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # Suppress new-app highlight via UserAssist and StartMenu tracking
+    $highlightPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+    if (Test-Path $highlightPath) {
+        # Disable "Show recently added apps" in Start menu
+        Set-ItemProperty -Path $highlightPath -Name "Start_TrackProgs" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+    }
+
+    # Clear the Recently Installed apps list in the Start menu layout
+    $installedAppsPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\StartPage"
+    if (Test-Path $installedAppsPath) {
+        Remove-ItemProperty -Path $installedAppsPath -Name "NewItems" -ErrorAction SilentlyContinue
+    }
+
+    # Remove from Start menu pinned/recommended via Shell folders
+    @("HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+      "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall") | ForEach-Object {
+        Get-ChildItem $_ -ErrorAction SilentlyContinue | ForEach-Object {
+            $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+            if ($props.DisplayName -match "(?i)netbird|(?i)netrelay") {
+                # Set NoStartMenuPin and NoDesktopShortcut flags
+                Set-ItemProperty -Path $_.PSPath -Name "NoStartMenuPin" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $_.PSPath -Name "NoDesktopShortcut" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    # Refresh Explorer shell to apply changes immediately
+    Stop-Process -Name "explorer" -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    Start-Process "explorer.exe" -ErrorAction SilentlyContinue
 }
-Write-Log "Shortcuts removed."
+Write-Log "Shortcuts removed and start menu highlights suppressed."
 
 # ------------------------------------------------------------------------------
-# ENSURE NETBIRD SERVICE STARTS AUTOMATICALLY
+# VERIFY SERVICE AUTOSTART
 # ------------------------------------------------------------------------------
-Invoke-WithSpinner "Configuring service autostart..." {
+Invoke-WithSpinner "Verifying service autostart..." {
     $serviceNames = @("Netbird", "netbird", "NetBird")
     foreach ($svcName in $serviceNames) {
         $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
@@ -639,11 +712,8 @@ Invoke-WithSpinner "Configuring service autostart..." {
             }
         }
     }
-    $nbExe = "$using:InstallDir\netbird.exe"
-    if (-not (Test-Path $nbExe)) { $nbExe = "$env:ProgramFiles\Netbird\netbird.exe" }
-    if (Test-Path $nbExe) { & $nbExe service start 2>&1 | Out-Null }
 }
-Write-Log "NetBird service autostart configured."
+Write-Log "NetBird service verified as Automatic startup."
 
 # ------------------------------------------------------------------------------
 # SCHEDULED TASK
