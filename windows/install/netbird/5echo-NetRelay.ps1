@@ -680,18 +680,11 @@ if (-not $UpdateOnly) {
         & $NetbirdExe down 2>&1 | Out-Null
         Start-Sleep -Seconds 3
 
-        # Write setup key to a temp file so it is not exposed in process list
-        $keyFile = "$env:TEMP
-b_key_$PID.tmp"
-        Set-Content -Path $keyFile -Value $SetupKey -Encoding UTF8
-
-        # Run netbird up - let it run normally (no output redirect)
-        # Use Start-Process with -Wait so we wait for it to complete
+        # Run netbird up with setup key via Start-Process.
+        # No output redirection - preserves local gRPC communication with daemon.
         $upProc = Start-Process -FilePath $NetbirdExe `
-            -ArgumentList "up", "--setup-key", $SetupKey `
+            -ArgumentList "up --setup-key $SetupKey" `
             -Wait -PassThru -WindowStyle Hidden
-
-        Remove-Item $keyFile -ErrorAction SilentlyContinue
         Write-Log "netbird up exit code: $($upProc.ExitCode)"
 
         # Give daemon time to register and connect
@@ -710,7 +703,7 @@ b_key_$PID.tmp"
 
             # Retry once
             Start-Process -FilePath $NetbirdExe `
-                -ArgumentList "up", "--setup-key", $SetupKey `
+                -ArgumentList "up --setup-key $SetupKey" `
                 -Wait -WindowStyle Hidden
             Start-Sleep -Seconds 10
 
