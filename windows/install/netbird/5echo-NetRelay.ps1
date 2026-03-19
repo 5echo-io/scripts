@@ -11,7 +11,8 @@ param(
     [switch]$ElevatedRun,
     [string]$KeyFile   = "",
     [switch]$UpdateOnly,
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [switch]$ActivateSSH
 )
 
 # ------------------------------------------------------------------------------
@@ -319,7 +320,7 @@ New-Item -ItemType Directory -Path $TempDir -Force | Out-Null
 # ------------------------------------------------------------------------------
 # INSTALLATION CHECK - show menu if already installed
 # ------------------------------------------------------------------------------
-if (-not $UpdateOnly -and -not $Uninstall -and -not $ElevatedRun) {
+if (-not $UpdateOnly -and -not $Uninstall -and -not $ElevatedRun -and -not $ActivateSSH) {
     if (Test-NetbirdInstalled) {
         Write-Host ""
         Write-Host "  ========================================" -ForegroundColor DarkGray
@@ -329,9 +330,27 @@ if (-not $UpdateOnly -and -not $Uninstall -and -not $ElevatedRun) {
         Write-Host "  Software is already installed." -ForegroundColor Yellow
         Write-Host ""
         Write-Host "  [1] Uninstall completely"
-        Write-Host "  [2] Cancel"
+        Write-Host "  [2] Enable NetBird SSH"
+        Write-Host "  [3] Cancel"
         Write-Host ""
-        $choice = (Read-Host "  Select [1-2]").Trim()
+        $choice = (Read-Host "  Select [1-3]").Trim()
+        if ($choice -eq "2") {
+            Write-Host ""
+            $scriptPath2 = $MyInvocation.MyCommand.Definition
+            if ([string]::IsNullOrEmpty($scriptPath2) -or -not (Test-Path $scriptPath2)) {
+                $scriptPath2 = "$env:TEMP\5echo-SSH.ps1"
+                $ProgressPreference = "SilentlyContinue"
+                Invoke-WebRequest -Uri $ScriptPublicUrl -OutFile $scriptPath2 -UseBasicParsing
+            }
+            $sshArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath2`" -ActivateSSH"
+            if (Test-IsAdmin) {
+                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$scriptPath2" -ActivateSSH
+            } else {
+                Start-Process powershell.exe -ArgumentList $sshArgs -Verb RunAs -Wait
+            }
+            if ($scriptPath2 -match "SSH\.ps1$") { Remove-Item $scriptPath2 -ErrorAction SilentlyContinue }
+            exit
+        }
         if ($choice -eq "1") {
             Write-Host ""
             Write-Host "  Starting uninstall..." -ForegroundColor Cyan
@@ -391,6 +410,7 @@ Read-Host | Out-Null
     if ($tempKeyFile) { $elevArgs += " -KeyFile `"$tempKeyFile`"" }
     if ($UpdateOnly)  { $elevArgs += " -UpdateOnly" }
     if ($Uninstall)   { $elevArgs += " -Uninstall" }
+    if ($ActivateSSH) { $elevArgs += " -ActivateSSH" }
 
     Start-Process powershell.exe -ArgumentList $elevArgs -Verb RunAs -Wait
     if ($tempKeyFile) { Remove-Item $tempKeyFile -ErrorAction SilentlyContinue }
@@ -479,6 +499,42 @@ Read-Host | Out-Null
 }
 
 # ------------------------------------------------------------------------------
+# ACTIVATE SSH (standalone)
+# ------------------------------------------------------------------------------
+if ($ActivateSSH) {
+    Write-Host ""
+    Write-Host "  ========================================" -ForegroundColor DarkGray
+    Write-Host "    $ServiceDisplayName" -ForegroundColor White
+    Write-Host "    Enabling NetBird SSH..." -ForegroundColor DarkGray
+    Write-Host "  ========================================" -ForegroundColor DarkGray
+    Write-Host ""
+    $nbExe = "$InstallDir\netbird.exe"
+    if (-not (Test-Path $nbExe)) { $nbExe = "$env:ProgramFiles\Netbird\netbird.exe" }
+    if (-not (Test-Path $nbExe)) {
+        Write-Host "  ERROR: netbird.exe not found." -ForegroundColor Red
+        Write-Host "  Press ESC to close..." -ForegroundColor DarkGray
+        do { $k = [Console]::ReadKey($true) } while ($k.Key -ne [ConsoleKey]::Escape)
+        exit 1
+    }
+    Write-Host "  |  Activating NetBird SSH...   " -NoNewline -ForegroundColor Cyan
+    try {
+        & $nbExe up --allow-server-ssh 2>&1 | Out-Null
+        Start-Sleep -Seconds 3
+        $st = & $nbExe status 2>&1
+        if ($st -match "SSH Server: Enabled") {
+            Write-Host "`r  OK  NetBird SSH is now enabled.          " -ForegroundColor Green
+        } else {
+            Write-Host "`r  OK  SSH command sent to NetBird service. " -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Host "`r  WARN  Failed: $_   " -ForegroundColor Yellow
+    }
+    Write-Host ""
+    Write-Host "  Press ESC to close..." -ForegroundColor DarkGray
+    do { $k = [Console]::ReadKey($true) } while ($k.Key -ne [ConsoleKey]::Escape)
+    exit 0
+}
+
 # GET SETUP KEY
 # ------------------------------------------------------------------------------
 $SetupKey = ""
@@ -785,5 +841,23 @@ Write-Host "  Autostart     : Enabled (starts with Windows)" -ForegroundColor Cy
 Write-Host "  Auto-update   : Daily 03:00 + at startup" -ForegroundColor Cyan
 Write-Host "  Log           : $LogFile" -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "  Press ENTER to close..." -ForegroundColor DarkGray
-Read-Host | Out-Null
+Write-Host "  ----------------------------------------" -ForegroundColor DarkGray
+Write-Host "  IMPORTANT: A restart is recommended" -ForegroundColor Yellow
+Write-Host "  This ensures NetBird shows online and" -ForegroundColor DarkGray
+Write-Host "  runs correctly as a system service." -ForegroundColor DarkGray
+Write-Host "  ----------------------------------------" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "  [R] Restart now    [ESC] Close" -ForegroundColor White
+Write-Host ""
+$restartDone = $false
+while (-not $restartDone) {
+    $k = [Console]::ReadKey($true)
+    if ($k.Key -eq [ConsoleKey]::R) {
+        Write-Host "  Restarting in 5 seconds..." -ForegroundColor Yellow
+        Start-Sleep -Seconds 5
+        Restart-Computer -Force
+        $restartDone = $true
+    } elseif ($k.Key -eq [ConsoleKey]::Escape) {
+        $restartDone = $true
+    }
+}
