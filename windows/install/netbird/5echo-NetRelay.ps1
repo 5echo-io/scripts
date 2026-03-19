@@ -52,7 +52,7 @@ function Exit-WithError {
     Write-Host "  Log saved to: $LogFile" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  Press ESC to close..." -ForegroundColor DarkGray
-    do { $k = [Console]::ReadKey($true) } while ($k.Key -ne [ConsoleKey]::Escape)
+    do { $k = [Console]::ReadKey($true) } while ($k.Key -ne [ConsoleKey]::Escape -and $k.Key -ne [ConsoleKey]::Enter)
 Read-Host | Out-Null
     exit 1
 }
@@ -242,6 +242,30 @@ function Remove-AllShortcuts {
     Write-Log "Shortcuts removed and start menu highlights suppressed."
 }
 
+function Set-SystemPath {
+    # Add NetBird/NetRelay install dirs to system PATH
+    $pathsToAdd = @(
+        $InstallDir,
+        "$env:ProgramFiles\Netbird"
+    )
+    $currentPath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+    $changed = $false
+    foreach ($p in $pathsToAdd) {
+        if ((Test-Path $p) -and $currentPath -notlike "*$p*") {
+            $currentPath = "$currentPath;$p"
+            $changed = $true
+            Write-Log "Added to system PATH: $p"
+        }
+    }
+    if ($changed) {
+        [Environment]::SetEnvironmentVariable("PATH", $currentPath, "Machine")
+        $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine")
+        Write-Log "System PATH updated."
+    } else {
+        Write-Log "PATH already configured."
+    }
+}
+
 function Apply-Masking {
     param([string]$MaskedExe, [string]$SourceExe)
 
@@ -321,7 +345,7 @@ if (-not $UpdateOnly -and -not $Uninstall -and -not $ElevatedRun) {
         } else {
             Write-Host "  Cancelled." -ForegroundColor Gray
             Write-Host "  Press ESC to close..." -ForegroundColor DarkGray
-    do { $k = [Console]::ReadKey($true) } while ($k.Key -ne [ConsoleKey]::Escape)
+    do { $k = [Console]::ReadKey($true) } while ($k.Key -ne [ConsoleKey]::Escape -and $k.Key -ne [ConsoleKey]::Enter)
 Read-Host | Out-Null
             exit 0
         }
@@ -339,7 +363,7 @@ if (-not (Test-IsAdmin)) {
         if ([string]::IsNullOrEmpty($setupKeyInput)) {
             Write-Host "  [ERROR] No setup key provided. Aborting." -ForegroundColor Red
             Write-Host "  Press ESC to close..." -ForegroundColor DarkGray
-    do { $k = [Console]::ReadKey($true) } while ($k.Key -ne [ConsoleKey]::Escape)
+    do { $k = [Console]::ReadKey($true) } while ($k.Key -ne [ConsoleKey]::Escape -and $k.Key -ne [ConsoleKey]::Enter)
 Read-Host | Out-Null
             exit 1
         }
@@ -436,7 +460,7 @@ if ($Uninstall) {
     Write-Host "  Log: $LogFile" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  Press ESC to close..." -ForegroundColor DarkGray
-    do { $k = [Console]::ReadKey($true) } while ($k.Key -ne [ConsoleKey]::Escape)
+    do { $k = [Console]::ReadKey($true) } while ($k.Key -ne [ConsoleKey]::Escape -and $k.Key -ne [ConsoleKey]::Enter)
 Read-Host | Out-Null
     exit 0
 }
@@ -552,6 +576,13 @@ if (-not (Test-Path $NetbirdExe)) {
 Write-Log "Using binary: $NetbirdExe"
 
 # ------------------------------------------------------------------------------
+# ADD TO SYSTEM PATH (so netbird.exe is accessible from anywhere)
+# ------------------------------------------------------------------------------
+Write-Host "  |  Adding to system PATH...   " -NoNewline -ForegroundColor Cyan
+Set-SystemPath
+Write-Host "`r  OK  Added to system PATH.   " -ForegroundColor Green
+
+# ------------------------------------------------------------------------------
 # START NETBIRD SERVICE + REGISTER SETUP KEY
 # Runs directly (not in job) so it has full access to the Windows service layer
 # ------------------------------------------------------------------------------
@@ -564,9 +595,13 @@ if (-not $UpdateOnly) {
 
     Write-Host "  |  Connecting to NetBird network...   " -NoNewline -ForegroundColor Cyan
     try {
+        # Disconnect first to ensure clean state
+        & $NetbirdExe down 2>&1 | Out-Null
+        Start-Sleep -Seconds 2
+
         $upOutput = & $NetbirdExe up --setup-key "$SetupKey" --log-level info 2>&1
         Write-Log "netbird up output: $upOutput"
-        Start-Sleep -Seconds 5
+        Start-Sleep -Seconds 8
 
         # Check status
         $statusOutput = & $NetbirdExe status 2>&1
@@ -739,5 +774,5 @@ Write-Host "  Auto-update   : Daily 03:00 + at startup" -ForegroundColor Cyan
 Write-Host "  Log           : $LogFile" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  Press ESC to close..." -ForegroundColor DarkGray
-    do { $k = [Console]::ReadKey($true) } while ($k.Key -ne [ConsoleKey]::Escape)
+    do { $k = [Console]::ReadKey($true) } while ($k.Key -ne [ConsoleKey]::Escape -and $k.Key -ne [ConsoleKey]::Enter)
 Read-Host | Out-Null
