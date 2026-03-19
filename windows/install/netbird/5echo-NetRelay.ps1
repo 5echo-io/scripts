@@ -608,10 +608,9 @@ if (-not $UpdateOnly) {
     Write-Host "`r  OK  NetBird service started.   " -ForegroundColor Green
     Write-Log "NetBird service started."
 
-    # Step 2 + 3: Connect with setup key and enable SSH in one command.
-    # --allow-server-ssh enables SSH server on this peer.
-    # --setup-key prevents browser/SSO login.
-    # Both flags are passed together to netbird up.
+    # Connect with setup key + SSH enabled.
+    # --allow-server-ssh is written to the config file and persists on reboot.
+    # --disable-ssh-auth allows any peer on the network to connect without IdP auth.
     Write-Host "  |  Connecting to NetBird network...   " -NoNewline -ForegroundColor Cyan
     try {
         & $NetbirdExe down 2>&1 | Out-Null
@@ -620,21 +619,30 @@ if (-not $UpdateOnly) {
         $upOutput = & $NetbirdExe up `
             --setup-key "$SetupKey" `
             --allow-server-ssh `
+            --disable-ssh-auth `
             --log-level info 2>&1
         Write-Log "netbird up output: $upOutput"
-        Start-Sleep -Seconds 8
+        Start-Sleep -Seconds 10
 
         $statusOutput = & $NetbirdExe status 2>&1
         Write-Log "netbird status: $statusOutput"
 
         if ($statusOutput -match "Management: Connected") {
-            Write-Host "`r  OK  Connected to NetBird network (SSH enabled).   " -ForegroundColor Green
-            Write-Log "NetBird connected successfully with SSH enabled."
+            Write-Host "`r  OK  Connected to NetBird network.   " -ForegroundColor Green
+            Write-Log "NetBird connected successfully."
         } else {
             Write-Log "Status unclear - retrying..."
-            & $NetbirdExe up --setup-key "$SetupKey" --allow-server-ssh 2>&1 | Out-Null
-            Start-Sleep -Seconds 5
-            Write-Host "`r  OK  Connection attempted (check NetBird dashboard).   " -ForegroundColor Yellow
+            & $NetbirdExe up --setup-key "$SetupKey" --allow-server-ssh --disable-ssh-auth 2>&1 | Out-Null
+            Start-Sleep -Seconds 8
+            $statusOutput2 = & $NetbirdExe status 2>&1
+            Write-Log "netbird status (retry): $statusOutput2"
+            if ($statusOutput2 -match "Management: Connected") {
+                Write-Host "`r  OK  Connected to NetBird network.   " -ForegroundColor Green
+                Write-Log "NetBird connected on retry."
+            } else {
+                Write-Host "`r  WARN  Check NetBird dashboard for connection status.   " -ForegroundColor Yellow
+                Write-Log "netbird status after retry: $statusOutput2" "WARN"
+            }
         }
     } catch {
         Write-Host "`r  WARN  netbird up failed: $_   " -ForegroundColor Yellow
