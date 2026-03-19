@@ -41,25 +41,40 @@ function Write-Log {
     Add-Content -Path $LogFile -Value $line -ErrorAction SilentlyContinue
 }
 
-# Spinner - runs a scriptblock in the background and shows animation until done
+# Spinner - animates while a scriptblock runs IN-PROCESS (no background job)
+# This avoids the scope issues with Write-Log and $using: variables
 function Invoke-WithSpinner {
     param(
         [string]$Message,
         [scriptblock]$ScriptBlock
     )
-
     $frames  = @("|", "/", "-", "\")
     $frameIdx = 0
+    $result  = $null
+    $error_msg = $null
 
-    # Run the work in a background job
-    $job = Start-Job -ScriptBlock $ScriptBlock
+    # Run the work in a thread job (stays in same process, shares scope)
+    $job = Start-ThreadJob -ScriptBlock $ScriptBlock -ErrorAction SilentlyContinue
 
-    # Animate while job is running
+    # Fall back to regular job if ThreadJob not available
+    if (-not $job) {
+        # Just run inline without spinner if ThreadJob unavailable
+        Write-Host "  ...  $Message" -ForegroundColor Cyan
+        try {
+            $result = & $ScriptBlock
+        } catch {
+            $error_msg = $_
+        }
+        Write-Host "`r  OK   $Message   " -ForegroundColor Green
+        if ($error_msg) { Write-Log "Warning in '$Message': $error_msg" "WARN" }
+        return $result
+    }
+
     [Console]::CursorVisible = $false
     try {
         while ($job.State -eq "Running") {
             $frame = $frames[$frameIdx % $frames.Length]
-            Write-Host "`r  $frame  $Message   " -NoNewline -ForegroundColor Cyan
+            Write-Host "`r  $frame    $Message   " -NoNewline -ForegroundColor Cyan
             Start-Sleep -Milliseconds 120
             $frameIdx++
         }
@@ -67,12 +82,10 @@ function Invoke-WithSpinner {
         [Console]::CursorVisible = $true
     }
 
-    # Clear spinner line and show done
-    Write-Host "`r  OK  $Message   " -ForegroundColor Green
+    Write-Host "`r  OK   $Message   " -ForegroundColor Green
 
-    # Return job output and clean up
-    $result = Receive-Job $job
-    Remove-Job $job -Force
+    $result = Receive-Job $job -ErrorAction SilentlyContinue
+    Remove-Job $job -Force -ErrorAction SilentlyContinue
     return $result
 }
 
@@ -91,18 +104,9 @@ function Get-Architecture {
     exit 1
 }
 
-function Get-LatestNetbirdVersion {
-    try {
-        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/netbirdio/netbird/releases/latest" -UseBasicParsing
-        return $release.tag_name.TrimStart("v")
-    } catch {
-        Write-Log "Failed to fetch version from GitHub: $_" "ERROR"
-        exit 1
-    }
-}
-
 function Get-InstalledNetbirdVersion {
     $exe = "$InstallDir\netbird.exe"
+    if (-not (Test-Path $exe)) { $exe = "$env:ProgramFiles\Netbird\netbird.exe" }
     if (-not (Test-Path $exe)) { return $null }
     try {
         $output = & $exe version 2>&1
@@ -122,9 +126,7 @@ function Test-NetbirdInstalled {
         "$env:ProgramFiles\NetRelay\netbird.exe",
         "$env:ProgramFiles\Netbird\netbird.exe"
     )
-    foreach ($p in $paths) {
-        if (Test-Path $p) { return $true }
-    }
+    foreach ($p in $paths) { if (Test-Path $p) { return $true } }
     $roots = @(
         "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
         "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
@@ -140,12 +142,12 @@ function Test-NetbirdInstalled {
 }
 
 function Set-ServiceMasking {
-    $MaskedExe = "$InstallDir\netrelay.exe"
+    $MaskedExe    = "$InstallDir\netrelay.exe"
     $serviceNames = @("Netbird", "netbird", "NetBird")
     foreach ($svcName in $serviceNames) {
         $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
         if ($svc) {
-            & sc.exe config $svcName displayname= "$ServiceDisplayName" 2>&1 | Out-Null
+            & sc.exe config      $svcName displayname= "$ServiceDisplayName" 2>&1 | Out-Null
             & sc.exe description $svcName "$ServiceDisplayName - secure network connection" 2>&1 | Out-Null
             $svcRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$svcName"
             if (Test-Path $svcRegPath) {
@@ -153,18 +155,107 @@ function Set-ServiceMasking {
                 Set-ItemProperty -Path $svcRegPath -Name "Description" -Value "$ServiceDisplayName - secure network connection" -Force -ErrorAction SilentlyContinue
                 Set-ItemProperty -Path $svcRegPath -Name "ImagePath"   -Value $MaskedExe -Force -ErrorAction SilentlyContinue
             }
+            Write-Log "Service '$svcName' masked as '$ServiceDisplayName'."
         }
     }
 }
 
-function Invoke-Remasking {
-    $MaskedExe = "$InstallDir\netrelay.exe"
-    $roots = @(
+function Set-NetbirdAutostart {
+    $serviceNames = @("Netbird", "netbird", "NetBird")
+    foreach ($svcName in $serviceNames) {
+        $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+        if ($svc) {
+            Set-Service -Name $svcName -StartupType Automatic -ErrorAction SilentlyContinue
+            & sc.exe config $svcName start= auto 2>&1 | Out-Null
+            if ($svc.Status -ne "Running") {
+                Start-Service -Name $svcName -ErrorAction SilentlyContinue
+            }
+            Write-Log "Service '$svcName' set to Automatic startup."
+            return $true
+        }
+    }
+    return $false
+}
+
+function Remove-NetbirdShortcuts {
+    Start-Sleep -Seconds 2
+
+    $desktopPaths = @(
+        "$env:USERPROFILE\Desktop",
+        "$env:PUBLIC\Desktop",
+        [Environment]::GetFolderPath("CommonDesktopDirectory"),
+        [Environment]::GetFolderPath("DesktopDirectory")
+    ) | Select-Object -Unique
+
+    foreach ($path in $desktopPaths) {
+        if (-not (Test-Path $path)) { continue }
+        Get-ChildItem -Path $path -Filter "*.lnk" -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -match "(?i)netbird|(?i)netrelay"
+        } | Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+
+    $startMenuPaths = @(
+        "$env:APPDATA\Microsoft\Windows\Start Menu\Programs",
+        "$env:ProgramData\Microsoft\Windows\Start Menu\Programs",
+        [Environment]::GetFolderPath("CommonPrograms"),
+        [Environment]::GetFolderPath("Programs")
+    ) | Select-Object -Unique
+
+    foreach ($path in $startMenuPaths) {
+        if (-not (Test-Path $path)) { continue }
+        Get-ChildItem -Path $path -Recurse -Filter "*.lnk" -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -match "(?i)netbird|(?i)netrelay"
+        } | Remove-Item -Force -ErrorAction SilentlyContinue
+
+        Get-ChildItem -Path $path -Directory -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -match "(?i)netbird|(?i)netrelay"
+        } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # Suppress "Recently added" / "Recommended" in Start menu
+    $advPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+    if (Test-Path $advPath) {
+        Set-ItemProperty -Path $advPath -Name "Start_TrackProgs" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+    }
+
+    # Clear new-app notification cache
+    $cloudStore = "HKCU:\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\Cache\DefaultAccount"
+    if (Test-Path $cloudStore) {
+        Get-ChildItem -Path $cloudStore -Recurse -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -match "(?i)netbird|(?i)netrelay"
+        } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # Set NoStartMenuPin on uninstall entries
+    @(
         "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
         "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
-    )
-    foreach ($root in $roots) {
-        Get-ChildItem -Path $root -ErrorAction SilentlyContinue | ForEach-Object {
+    ) | ForEach-Object {
+        Get-ChildItem $_ -ErrorAction SilentlyContinue | ForEach-Object {
+            $dn = (Get-ItemProperty $_.PSPath -Name "DisplayName" -ErrorAction SilentlyContinue).DisplayName
+            if ($dn -and ($dn -match "(?i)netbird" -or $dn -match "(?i)netrelay")) {
+                Set-ItemProperty -Path $_.PSPath -Name "NoStartMenuPin"   -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $_.PSPath -Name "NoDesktopShortcut" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    # Restart Explorer to apply changes
+    Stop-Process -Name "explorer" -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    Start-Process "explorer.exe" -ErrorAction SilentlyContinue
+
+    Write-Log "Shortcuts removed and start menu highlights suppressed."
+}
+
+function Invoke-Remasking {
+    Write-Log "Running re-masking..."
+    $MaskedExe = "$InstallDir\netrelay.exe"
+    @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
+    ) | ForEach-Object {
+        Get-ChildItem -Path $_ -ErrorAction SilentlyContinue | ForEach-Object {
             $dn = (Get-ItemProperty -Path $_.PSPath -Name "DisplayName" -ErrorAction SilentlyContinue).DisplayName
             if ($dn -and ($dn -match "(?i)netbird" -or $dn -match "(?i)netrelay")) {
                 Set-ItemProperty -Path $_.PSPath -Name "DisplayName" -Value $ServiceDisplayName -Force
@@ -179,34 +270,7 @@ function Invoke-Remasking {
         Copy-Item $sourceExe -Destination $MaskedExe -Force -ErrorAction SilentlyContinue
     }
     Set-ServiceMasking
-}
-
-function Install-OpenSSH {
-    # Run capability check in background job with 60s timeout
-    $job = Start-Job {
-        Get-WindowsCapability -Online | Where-Object { $_.Name -like "OpenSSH.Server*" }
-    }
-    $sshCap = $job | Wait-Job -Timeout 60 | Receive-Job
-    Remove-Job $job -Force -ErrorAction SilentlyContinue
-
-    if ($sshCap -and $sshCap.State -ne "Installed") {
-        Add-WindowsCapability -Online -Name $sshCap.Name | Out-Null
-    } elseif (-not $sshCap) {
-        & dism.exe /Online /Add-Capability /CapabilityName:OpenSSH.Server~~~~0.0.1.0 /NoRestart 2>&1 | Out-Null
-    }
-
-    $sshSvc = Get-Service -Name "sshd" -ErrorAction SilentlyContinue
-    if ($sshSvc) {
-        Set-Service -Name "sshd" -StartupType Automatic
-        Start-Service -Name "sshd" -ErrorAction SilentlyContinue
-    }
-
-    $fwSSH = Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue
-    if (-not $fwSSH) {
-        New-NetFirewallRule -Name "OpenSSH-Server-In-TCP" `
-            -DisplayName "OpenSSH SSH Server (TCP-In)" `
-            -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
-    }
+    Write-Log "Re-masking complete."
 }
 
 # ------------------------------------------------------------------------------
@@ -276,18 +340,15 @@ if (-not (Test-IsAdmin)) {
 }
 
 # ------------------------------------------------------------------------------
-# HEADER
+# LOG START
 # ------------------------------------------------------------------------------
-Write-Log "=== $ServiceDisplayName - $(if ($UpdateOnly) { 'UPDATE' } elseif ($Uninstall) { 'UNINSTALL' } else { 'INSTALLATION' }) started === User: $env:USERNAME | Machine: $env:COMPUTERNAME"
+$mode = if ($UpdateOnly) { "UPDATE" } elseif ($Uninstall) { "UNINSTALL" } else { "INSTALLATION" }
+Write-Log "=== $ServiceDisplayName - $mode started === User: $env:USERNAME | Machine: $env:COMPUTERNAME"
 
 Write-Host ""
 Write-Host "  ========================================" -ForegroundColor DarkGray
 Write-Host "    $ServiceDisplayName" -ForegroundColor White
-if ($UpdateOnly) {
-    Write-Host "    Checking for updates..." -ForegroundColor DarkGray
-} else {
-    Write-Host "    Installing..." -ForegroundColor DarkGray
-}
+Write-Host "    $mode" -ForegroundColor DarkGray
 Write-Host "  ========================================" -ForegroundColor DarkGray
 Write-Host ""
 
@@ -297,52 +358,40 @@ Write-Host ""
 if ($Uninstall) {
     Write-Log "Starting uninstall..."
 
-    Invoke-WithSpinner "Stopping processes..." {
-        @("netbird", "netbird-ui", "netrelay", "wt-go") | ForEach-Object {
-            Get-Process -Name $_ -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-        }
-    }
+    Invoke-WithSpinner "Stopping processes..." { Stop-NetbirdProcesses }
 
     Invoke-WithSpinner "Removing Scheduled Task..." {
-        Unregister-ScheduledTask -TaskName "$using:UpdateTaskName" -Confirm:$false -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $UpdateTaskName -Confirm:$false -ErrorAction SilentlyContinue
     }
 
     Invoke-WithSpinner "Uninstalling via MSI..." {
-        $roots = @(
+        @(
             "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
             "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
-        )
-        foreach ($root in $roots) {
-            Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object {
+        ) | ForEach-Object {
+            Get-ChildItem $_ -ErrorAction SilentlyContinue | ForEach-Object {
                 $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
                 if ($props.DisplayName -and ($props.DisplayName -match "(?i)netbird" -or $props.DisplayName -match "(?i)netrelay")) {
-                    $productCode = $props.PSChildName
-                    if ($productCode -match "^\{.*\}$") {
-                        Start-Process "msiexec.exe" -ArgumentList "/x `"$productCode`" /qn /norestart" -Wait -WindowStyle Hidden
+                    $pc = $props.PSChildName
+                    if ($pc -match "^\{.*\}$") {
+                        Start-Process "msiexec.exe" -ArgumentList "/x `"$pc`" /qn /norestart" -Wait -WindowStyle Hidden
                     }
                 }
             }
         }
     }
 
-    Invoke-WithSpinner "Removing installation folders..." {
-        @(
-            "$env:ProgramFiles\NetRelay",
-            "$env:ProgramFiles\Netbird",
-            "$env:ProgramData\NetRelay"
-        ) | ForEach-Object {
+    Invoke-WithSpinner "Removing folders and registry..." {
+        @("$env:ProgramFiles\NetRelay", "$env:ProgramFiles\Netbird", "$env:ProgramData\NetRelay") | ForEach-Object {
             if (Test-Path $_) { Remove-Item $_ -Recurse -Force -ErrorAction SilentlyContinue }
         }
-    }
-
-    Invoke-WithSpinner "Cleaning registry and firewall rules..." {
         @(
             "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
             "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
             "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run"
         ) | ForEach-Object {
             if (Test-Path $_) {
-                @("Netbird", "NetbirdUI", "netbird-ui", "NetRelay") | ForEach-Object {
+                @("Netbird","NetbirdUI","netbird-ui","NetRelay") | ForEach-Object {
                     Remove-ItemProperty -Path $_ -Name $_ -ErrorAction SilentlyContinue
                 }
             }
@@ -355,8 +404,11 @@ if ($Uninstall) {
     Write-Host ""
     Write-Host "  $ServiceDisplayName has been completely uninstalled." -ForegroundColor Green
     Write-Host "  Note: OpenSSH and RDP have been kept (OS features)." -ForegroundColor DarkGray
+    Write-Host ""
     Write-Host "  Log: $LogFile" -ForegroundColor DarkGray
     Write-Host ""
+    Write-Host "  Press any key to close..." -ForegroundColor DarkGray
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
     exit 0
 }
 
@@ -366,6 +418,7 @@ if ($Uninstall) {
 $SetupKey = ""
 if (-not $UpdateOnly) {
     if ($ElevatedRun -and $KeyFile -and (Test-Path $KeyFile)) {
+        Write-Log "Reading setup key from encrypted temp file..."
         $encryptedKey = Get-Content -Path $KeyFile
         $secureKey    = ConvertTo-SecureString $encryptedKey
         $bstr         = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureKey)
@@ -377,6 +430,10 @@ if (-not $UpdateOnly) {
     }
     if ([string]::IsNullOrEmpty($SetupKey)) {
         Write-Host "  [ERROR] Setup key missing. Aborting." -ForegroundColor Red
+        Write-Log "Setup key missing. Aborting." "ERROR"
+        Write-Host ""
+        Write-Host "  Press any key to close..." -ForegroundColor DarkGray
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
         exit 1
     }
     Write-Host ""
@@ -388,12 +445,14 @@ if (-not $UpdateOnly) {
 $Arch = Get-Architecture
 Write-Log "Architecture: $Arch"
 
-$NetbirdVersion = Invoke-WithSpinner "Fetching latest version..." {
-    try {
-        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/netbirdio/netbird/releases/latest" -UseBasicParsing
-        $release.tag_name.TrimStart("v")
-    } catch { "latest" }
+Write-Host "  ...  Fetching latest version..." -ForegroundColor Cyan
+try {
+    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/netbirdio/netbird/releases/latest" -UseBasicParsing
+    $NetbirdVersion = $release.tag_name.TrimStart("v")
+} catch {
+    Write-Log "Failed to fetch version from GitHub: $_" "WARN"
 }
+Write-Host "`r  OK   Fetching latest version ($NetbirdVersion)   " -ForegroundColor Green
 Write-Log "Target version: $NetbirdVersion"
 
 # ------------------------------------------------------------------------------
@@ -403,7 +462,7 @@ if ($UpdateOnly) {
     $installedVer = Get-InstalledNetbirdVersion
     Write-Log "Installed: $(if ($installedVer) { $installedVer } else { 'not found' }) | Available: $NetbirdVersion"
     if ($installedVer -eq $NetbirdVersion) {
-        Write-Host "  OK  Already up to date ($NetbirdVersion)." -ForegroundColor Green
+        Write-Host "  OK   Already up to date ($NetbirdVersion)." -ForegroundColor Green
         Write-Host ""
         Write-Log "Already up to date. Exiting."
         exit 0
@@ -420,7 +479,16 @@ $MsiPath     = "$TempDir\$MsiFileName"
 
 Invoke-WithSpinner "Downloading NetBird $NetbirdVersion..." {
     $ProgressPreference = 'SilentlyContinue'
-    Invoke-WebRequest -Uri $using:DownloadUrl -OutFile $using:MsiPath -UseBasicParsing
+    Invoke-WebRequest -Uri $DownloadUrl -OutFile $MsiPath -UseBasicParsing
+}
+
+if (-not (Test-Path $MsiPath)) {
+    Write-Host "  [ERROR] Download failed. Check log: $LogFile" -ForegroundColor Red
+    Write-Log "MSI file not found after download: $DownloadUrl" "ERROR"
+    Write-Host ""
+    Write-Host "  Press any key to close..." -ForegroundColor DarkGray
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    exit 1
 }
 Write-Log "Download complete: $MsiPath"
 
@@ -433,10 +501,12 @@ $MsiLog  = "$TempDir\msi_install.log"
 $MsiArgs = @("/i", "`"$MsiPath`"", "/qn", "/norestart", "REBOOT=ReallySuppress", "STARTMENUSHORTCUTS=0", "DESKTOPSHORTCUT=0", "/log", "`"$MsiLog`"")
 
 Invoke-WithSpinner "Installing $ServiceDisplayName..." {
-    $p = Start-Process "msiexec.exe" -ArgumentList $using:MsiArgs -Wait -PassThru -WindowStyle Hidden
+    $p = Start-Process "msiexec.exe" -ArgumentList $MsiArgs -Wait -PassThru -WindowStyle Hidden
     $p.ExitCode
 }
-Write-Log "MSI installation complete."
+
+$msiExitCode = (Get-Content $LogFile -Tail 5 -ErrorAction SilentlyContinue) -match "exit"
+Write-Log "MSI installation step complete. See: $MsiLog"
 
 # Copy binaries to custom folder
 if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null }
@@ -448,92 +518,83 @@ if (Test-Path "$defaultInstall\netbird.exe") {
 $NetbirdExe = "$InstallDir\netbird.exe"
 if (-not (Test-Path $NetbirdExe)) { $NetbirdExe = "$defaultInstall\netbird.exe" }
 if (-not (Test-Path $NetbirdExe)) {
-    Write-Host "  [ERROR] netbird.exe not found after installation." -ForegroundColor Red
+    Write-Host "  [ERROR] netbird.exe not found after installation. Check log: $LogFile" -ForegroundColor Red
     Write-Log "netbird.exe not found after installation." "ERROR"
+    Write-Host ""
+    Write-Host "  Press any key to close..." -ForegroundColor DarkGray
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
     exit 1
+}
+Write-Log "Using binary: $NetbirdExe"
+
+# ------------------------------------------------------------------------------
+# START NETBIRD SERVICE FIRST
+# ------------------------------------------------------------------------------
+Invoke-WithSpinner "Starting NetBird service..." {
+    Set-NetbirdAutostart
+    Start-Sleep -Seconds 3
 }
 
 # ------------------------------------------------------------------------------
 # REGISTER SETUP KEY AND CONNECT
 # ------------------------------------------------------------------------------
 if (-not $UpdateOnly) {
-    Invoke-WithSpinner "Starting NetBird service..." {
-        # Ensure service is running before attempting to connect
-        $serviceNames = @("Netbird", "netbird", "NetBird")
-        foreach ($svcName in $serviceNames) {
-            $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
-            if ($svc) {
-                Set-Service -Name $svcName -StartupType Automatic -ErrorAction SilentlyContinue
-                & sc.exe config $svcName start= auto 2>&1 | Out-Null
-                Start-Service -Name $svcName -ErrorAction SilentlyContinue
-                Start-Sleep -Seconds 3
-            }
-        }
-    }
-
     Invoke-WithSpinner "Connecting to NetBird network..." {
-        # Run netbird up with setup key - this registers AND connects
-        & $using:NetbirdExe up --setup-key "$using:SetupKey" --log-level info 2>&1 | Out-Null
+        # netbird up handles both registration and connection
+        $result = & $NetbirdExe up --setup-key "$SetupKey" --log-level info 2>&1
+        Write-Log "netbird up output: $result"
         Start-Sleep -Seconds 5
 
-        # Verify connection status
-        $status = & $using:NetbirdExe status 2>&1
-        if ($status -match "(?i)connected|(?i)running") {
-            Write-Log "NetBird connected successfully."
-        } else {
-            # Retry once if not connected
-            & $using:NetbirdExe up --setup-key "$using:SetupKey" 2>&1 | Out-Null
+        # Verify
+        $status = & $NetbirdExe status 2>&1
+        Write-Log "netbird status: $status"
+        if ($status -notmatch "(?i)connected|(?i)running") {
+            Write-Log "Status not confirmed connected - retrying..." "WARN"
+            & $NetbirdExe up --setup-key "$SetupKey" 2>&1 | Out-Null
+            Start-Sleep -Seconds 3
         }
     }
-    Write-Log "Setup key registered and connection established."
+    Write-Log "NetBird connection attempt complete."
 }
 
 # ------------------------------------------------------------------------------
 # RE-MASKING AFTER UPDATE
 # ------------------------------------------------------------------------------
 if ($UpdateOnly) {
-    Invoke-WithSpinner "Re-applying masking..." { }
-    Invoke-Remasking
+    Invoke-WithSpinner "Re-applying masking..." { Invoke-Remasking }
 }
 
 # ------------------------------------------------------------------------------
 # ENABLE NETBIRD SSH
 # ------------------------------------------------------------------------------
 Invoke-WithSpinner "Enabling NetBird SSH..." {
-    $p = Start-Process $using:NetbirdExe -ArgumentList "ssh --allow-connections" -Wait -PassThru -WindowStyle Hidden -ErrorAction SilentlyContinue
+    $p = Start-Process $NetbirdExe -ArgumentList "ssh --allow-connections" -Wait -PassThru -WindowStyle Hidden -ErrorAction SilentlyContinue
     if (-not $p -or $p.ExitCode -ne 0) {
-        Start-Process $using:NetbirdExe -ArgumentList "up --allow-server-ssh" -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue
+        & $NetbirdExe up --allow-server-ssh 2>&1 | Out-Null
     }
 }
 Write-Log "NetBird SSH enabled."
 
 # ------------------------------------------------------------------------------
-# ENABLE WINDOWS OPENSSH (with timeout + fallback)
+# ENABLE WINDOWS OPENSSH
 # ------------------------------------------------------------------------------
 Invoke-WithSpinner "Enabling Windows OpenSSH Server..." {
-    $job = Start-Job {
-        Get-WindowsCapability -Online | Where-Object { $_.Name -like "OpenSSH.Server*" }
-    }
-    $sshCap = $job | Wait-Job -Timeout 60 | Receive-Job
-    Remove-Job $job -Force -ErrorAction SilentlyContinue
-
-    if ($sshCap -and $sshCap.State -ne "Installed") {
-        Add-WindowsCapability -Online -Name $sshCap.Name | Out-Null
-    } elseif (-not $sshCap) {
+    try {
+        $sshCap = Get-WindowsCapability -Online -ErrorAction Stop | Where-Object { $_.Name -like "OpenSSH.Server*" }
+        if ($sshCap -and $sshCap.State -ne "Installed") {
+            Add-WindowsCapability -Online -Name $sshCap.Name | Out-Null
+        }
+    } catch {
         & dism.exe /Online /Add-Capability /CapabilityName:OpenSSH.Server~~~~0.0.1.0 /NoRestart 2>&1 | Out-Null
     }
-
     $svc = Get-Service -Name "sshd" -ErrorAction SilentlyContinue
     if ($svc) {
         Set-Service -Name "sshd" -StartupType Automatic
         Start-Service -Name "sshd" -ErrorAction SilentlyContinue
     }
-
     $fw = Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue
     if (-not $fw) {
-        New-NetFirewallRule -Name "OpenSSH-Server-In-TCP" `
-            -DisplayName "OpenSSH SSH Server (TCP-In)" `
-            -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
+        New-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -DisplayName "OpenSSH SSH Server (TCP-In)" -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
     }
 }
 Write-Log "Windows OpenSSH enabled."
@@ -546,7 +607,7 @@ Invoke-WithSpinner "Enabling RDP..." {
     Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
     $svc = Get-Service -Name "TermService" -ErrorAction SilentlyContinue
     if ($svc) {
-        Set-Service -Name "TermService" -StartupType Automatic
+        Set-Service  -Name "TermService" -StartupType Automatic
         Start-Service -Name "TermService" -ErrorAction SilentlyContinue
     }
     $fw = Get-NetFirewallRule -DisplayName "*Remote Desktop*" -ErrorAction SilentlyContinue | Where-Object { $_.Direction -eq "Inbound" -and $_.Enabled -eq "True" }
@@ -555,59 +616,42 @@ Invoke-WithSpinner "Enabling RDP..." {
 Write-Log "RDP enabled with NLA."
 
 # ------------------------------------------------------------------------------
-# MASKING
+# MASKING - PROCESS / APPS / SERVICE
 # ------------------------------------------------------------------------------
 Invoke-WithSpinner "Applying identity masking..." {
-    $MaskedExe = "$using:InstallDir\netrelay.exe"
-    $sourceExe = "$using:InstallDir\netbird.exe"
+    $MaskedExe = "$InstallDir\netrelay.exe"
+    $sourceExe = "$InstallDir\netbird.exe"
     if (-not (Test-Path $sourceExe)) { $sourceExe = "$env:ProgramFiles\Netbird\netbird.exe" }
     if (Test-Path $sourceExe) {
-        @("netbird", "netbird-ui", "netrelay", "wt-go") | ForEach-Object {
-            Get-Process -Name $_ -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-        }
+        Stop-NetbirdProcesses
         Copy-Item $sourceExe -Destination $MaskedExe -Force -ErrorAction SilentlyContinue
     }
 
-    $roots = @(
+    @(
         "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
         "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
-    )
-    foreach ($root in $roots) {
-        Get-ChildItem -Path $root -ErrorAction SilentlyContinue | ForEach-Object {
+    ) | ForEach-Object {
+        Get-ChildItem -Path $_ -ErrorAction SilentlyContinue | ForEach-Object {
             $dn = (Get-ItemProperty -Path $_.PSPath -Name "DisplayName" -ErrorAction SilentlyContinue).DisplayName
             if ($dn -and $dn -match "(?i)netbird") {
-                Set-ItemProperty -Path $_.PSPath -Name "DisplayName"     -Value $using:ServiceDisplayName -Force
-                Set-ItemProperty -Path $_.PSPath -Name "Publisher"       -Value "5echo.io"                -Force
-                Set-ItemProperty -Path $_.PSPath -Name "DisplayIcon"     -Value $MaskedExe                -Force -ErrorAction SilentlyContinue
-                Set-ItemProperty -Path $_.PSPath -Name "InstallLocation" -Value $using:InstallDir         -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $_.PSPath -Name "DisplayName"     -Value $ServiceDisplayName -Force
+                Set-ItemProperty -Path $_.PSPath -Name "Publisher"       -Value "5echo.io"           -Force
+                Set-ItemProperty -Path $_.PSPath -Name "DisplayIcon"     -Value $MaskedExe           -Force -ErrorAction SilentlyContinue
+                Set-ItemProperty -Path $_.PSPath -Name "InstallLocation" -Value $InstallDir          -Force -ErrorAction SilentlyContinue
             }
         }
     }
 
-    $serviceNames = @("Netbird", "netbird", "NetBird")
-    foreach ($svcName in $serviceNames) {
-        $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
-        if ($svc) {
-            & sc.exe config $svcName displayname= "$using:ServiceDisplayName" 2>&1 | Out-Null
-            & sc.exe description $svcName "$using:ServiceDisplayName - secure network connection" 2>&1 | Out-Null
-            $svcRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$svcName"
-            if (Test-Path $svcRegPath) {
-                Set-ItemProperty -Path $svcRegPath -Name "DisplayName" -Value $using:ServiceDisplayName -Force -ErrorAction SilentlyContinue
-                Set-ItemProperty -Path $svcRegPath -Name "Description" -Value "$using:ServiceDisplayName - secure network connection" -Force -ErrorAction SilentlyContinue
-                Set-ItemProperty -Path $svcRegPath -Name "ImagePath"   -Value $MaskedExe -Force -ErrorAction SilentlyContinue
-            }
-        }
-    }
+    Set-ServiceMasking
 
-    $runPaths = @(
+    @(
         "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
         "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
         "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run"
-    )
-    foreach ($regPath in $runPaths) {
-        if (Test-Path $regPath) {
-            @("Netbird", "NetbirdUI", "netbird-ui", "NetRelay") | ForEach-Object {
-                Remove-ItemProperty -Path $regPath -Name $_ -ErrorAction SilentlyContinue
+    ) | ForEach-Object {
+        if (Test-Path $_) {
+            @("Netbird","NetbirdUI","netbird-ui","NetRelay") | ForEach-Object {
+                Remove-ItemProperty -Path $_ -Name $_ -ErrorAction SilentlyContinue
             }
         }
     }
@@ -616,118 +660,28 @@ Invoke-WithSpinner "Applying identity masking..." {
 Write-Log "Masking applied."
 
 # ------------------------------------------------------------------------------
-# REMOVE SHORTCUTS AND SUPPRESS START MENU HIGHLIGHTS
+# REMOVE SHORTCUTS + SUPPRESS START MENU HIGHLIGHTS
 # ------------------------------------------------------------------------------
-Invoke-WithSpinner "Removing shortcuts..." {
-    # Wait briefly to ensure MSI has finished writing shortcuts
-    Start-Sleep -Seconds 2
-
-    # --- Desktop shortcuts ---
-    $desktopPaths = @(
-        "$env:USERPROFILE\Desktop",
-        "$env:PUBLIC\Desktop",
-        [Environment]::GetFolderPath("CommonDesktopDirectory"),
-        [Environment]::GetFolderPath("DesktopDirectory")
-    ) | Select-Object -Unique
-    foreach ($desktop in $desktopPaths) {
-        if (-not (Test-Path $desktop)) { continue }
-        Get-ChildItem -Path $desktop -Filter "*.lnk" -ErrorAction SilentlyContinue | Where-Object {
-            $_.Name -match "(?i)netbird|(?i)netrelay"
-        } | Remove-Item -Force -ErrorAction SilentlyContinue
-    }
-
-    # --- Start menu shortcuts and folders ---
-    $startMenuPaths = @(
-        "$env:APPDATA\Microsoft\Windows\Start Menu\Programs",
-        "$env:ProgramData\Microsoft\Windows\Start Menu\Programs",
-        [Environment]::GetFolderPath("CommonPrograms"),
-        [Environment]::GetFolderPath("Programs")
-    ) | Select-Object -Unique
-    foreach ($startMenu in $startMenuPaths) {
-        if (-not (Test-Path $startMenu)) { continue }
-        # Remove matching .lnk files
-        Get-ChildItem -Path $startMenu -Recurse -Filter "*.lnk" -ErrorAction SilentlyContinue | Where-Object {
-            $_.Name -match "(?i)netbird|(?i)netrelay"
-        } | Remove-Item -Force -ErrorAction SilentlyContinue
-        # Remove matching folders
-        Get-ChildItem -Path $startMenu -Directory -ErrorAction SilentlyContinue | Where-Object {
-            $_.Name -match "(?i)netbird|(?i)netrelay"
-        } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-    }
-
-    # --- Suppress "Recently added" and "Recommended" highlights in Start menu ---
-    # Windows tracks newly installed apps here - clearing prevents the highlight
-    $recentAppsPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\Cache\DefaultAccount"
-    if (Test-Path $recentAppsPath) {
-        Get-ChildItem -Path $recentAppsPath -Recurse -ErrorAction SilentlyContinue | Where-Object {
-            $_.Name -match "(?i)netbird|(?i)netrelay"
-        } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-    }
-
-    # Suppress new-app highlight via UserAssist and StartMenu tracking
-    $highlightPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-    if (Test-Path $highlightPath) {
-        # Disable "Show recently added apps" in Start menu
-        Set-ItemProperty -Path $highlightPath -Name "Start_TrackProgs" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-    }
-
-    # Clear the Recently Installed apps list in the Start menu layout
-    $installedAppsPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\StartPage"
-    if (Test-Path $installedAppsPath) {
-        Remove-ItemProperty -Path $installedAppsPath -Name "NewItems" -ErrorAction SilentlyContinue
-    }
-
-    # Remove from Start menu pinned/recommended via Shell folders
-    @("HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
-      "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall") | ForEach-Object {
-        Get-ChildItem $_ -ErrorAction SilentlyContinue | ForEach-Object {
-            $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
-            if ($props.DisplayName -match "(?i)netbird|(?i)netrelay") {
-                # Set NoStartMenuPin and NoDesktopShortcut flags
-                Set-ItemProperty -Path $_.PSPath -Name "NoStartMenuPin" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-                Set-ItemProperty -Path $_.PSPath -Name "NoDesktopShortcut" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-            }
-        }
-    }
-
-    # Refresh Explorer shell to apply changes immediately
-    Stop-Process -Name "explorer" -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 2
-    Start-Process "explorer.exe" -ErrorAction SilentlyContinue
-}
-Write-Log "Shortcuts removed and start menu highlights suppressed."
+Invoke-WithSpinner "Removing shortcuts..." { Remove-NetbirdShortcuts }
 
 # ------------------------------------------------------------------------------
 # VERIFY SERVICE AUTOSTART
 # ------------------------------------------------------------------------------
-Invoke-WithSpinner "Verifying service autostart..." {
-    $serviceNames = @("Netbird", "netbird", "NetBird")
-    foreach ($svcName in $serviceNames) {
-        $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
-        if ($svc) {
-            Set-Service -Name $svcName -StartupType Automatic -ErrorAction SilentlyContinue
-            & sc.exe config $svcName start= auto 2>&1 | Out-Null
-            if ($svc.Status -ne "Running") {
-                Start-Service -Name $svcName -ErrorAction SilentlyContinue
-            }
-        }
-    }
-}
-Write-Log "NetBird service verified as Automatic startup."
+Invoke-WithSpinner "Verifying service autostart..." { Set-NetbirdAutostart }
 
 # ------------------------------------------------------------------------------
 # SCHEDULED TASK
 # ------------------------------------------------------------------------------
 Invoke-WithSpinner "Setting up auto-update task..." {
-    $dest = "$env:ProgramData\$using:ServiceInternalName\Update-$using:ServiceInternalName.ps1"
+    $dest = "$env:ProgramData\$ServiceInternalName\Update-$ServiceInternalName.ps1"
     New-Item -ItemType Directory -Path (Split-Path $dest) -Force | Out-Null
 
-    $local = $using:MyInvocation_Definition
-    if ($local -and (Test-Path $local)) {
-        Copy-Item $local -Destination $dest -Force
+    $localPath = $MyInvocation.MyCommand.Definition
+    if ($localPath -and (Test-Path $localPath)) {
+        Copy-Item $localPath -Destination $dest -Force
     } else {
         $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri $using:ScriptPublicUrl -OutFile $dest -UseBasicParsing -ErrorAction SilentlyContinue
+        Invoke-WebRequest -Uri $ScriptPublicUrl -OutFile $dest -UseBasicParsing -ErrorAction SilentlyContinue
     }
 
     $action    = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$dest`" -ElevatedRun -UpdateOnly"
@@ -737,13 +691,10 @@ Invoke-WithSpinner "Setting up auto-update task..." {
     $settings  = New-ScheduledTaskSettingsSet -Hidden -RunOnlyIfNetworkAvailable -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
     $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 
-    Unregister-ScheduledTask -TaskName $using:UpdateTaskName -Confirm:$false -ErrorAction SilentlyContinue
-    Register-ScheduledTask -TaskName $using:UpdateTaskName -Action $action -Trigger @($tDaily, $tBoot) -Settings $settings -Principal $principal -Description "$using:ServiceDisplayName - automatic update" | Out-Null
+    Unregister-ScheduledTask -TaskName $UpdateTaskName -Confirm:$false -ErrorAction SilentlyContinue
+    Register-ScheduledTask -TaskName $UpdateTaskName -Action $action -Trigger @($tDaily, $tBoot) -Settings $settings -Principal $principal -Description "$ServiceDisplayName - automatic update" | Out-Null
 }
 Write-Log "Scheduled Task created."
-
-# Store script path for use inside job scope
-$MyInvocation_Definition = $MyInvocation.MyCommand.Definition
 
 # ------------------------------------------------------------------------------
 # CLEAN UP
@@ -752,7 +703,7 @@ Remove-Item $MsiPath -ErrorAction SilentlyContinue
 Write-Log "=== $ServiceDisplayName $(if ($UpdateOnly) { 'update' } else { 'installation' }) complete ==="
 
 # ------------------------------------------------------------------------------
-# DONE
+# DONE - window stays open so errors can be read
 # ------------------------------------------------------------------------------
 Write-Host ""
 Write-Host "  ========================================" -ForegroundColor DarkGray
@@ -763,8 +714,11 @@ Write-Host "  NetBird SSH   : Enabled" -ForegroundColor Cyan
 Write-Host "  Windows SSH   : Enabled (port 22)" -ForegroundColor Cyan
 Write-Host "  RDP           : Enabled (port 3389, NLA on)" -ForegroundColor Cyan
 Write-Host "  Tray icon     : Disabled" -ForegroundColor Cyan
-Write-Host "  Shortcuts     : Removed (desktop + start menu)" -ForegroundColor Cyan
+Write-Host "  Shortcuts     : Removed" -ForegroundColor Cyan
 Write-Host "  Autostart     : Enabled (service starts with Windows)" -ForegroundColor Cyan
 Write-Host "  Auto-update   : Daily 03:00 + at startup" -ForegroundColor Cyan
-Write-Host "  Log           : $LogFile" -ForegroundColor DarkGray
 Write-Host ""
+Write-Host "  Log: $LogFile" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "  Press any key to close..." -ForegroundColor DarkGray
+$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
