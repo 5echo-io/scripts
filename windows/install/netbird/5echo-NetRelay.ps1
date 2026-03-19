@@ -1,4 +1,3 @@
-
 # ==============================================================================
 # 5echo-NetRelay.ps1
 # 5echo.io NetRelay - Silent installation of NetBird
@@ -671,53 +670,65 @@ if (-not $UpdateOnly) {
     Write-Host "`r  OK  NetBird service started.   " -ForegroundColor Green
     Write-Log "NetBird service ready (daemon responding)."
 
-    # Step 2: Run netbird up with setup key directly (not in job)
-    # Running in a job breaks $using: scope for setup key - run directly instead
-    # with a process timeout via cmd.exe
+    # Step 2: Run netbird up with setup key
+    # netbird up communicates with the daemon via gRPC locally.
+    # The CLI sends the command and returns immediately - the daemon handles the rest.
+    # We do NOT redirect stdout as this breaks the local gRPC communication.
     Write-Host "  |  Connecting to NetBird network...   " -NoNewline -ForegroundColor Cyan
     try {
-        # First bring down any existing connection
+        # Bring down any existing connection first
         & $NetbirdExe down 2>&1 | Out-Null
-        Start-Sleep -Seconds 2
+        Start-Sleep -Seconds 3
 
-        # Run netbird up with setup key - allow up to 45 seconds
-        $pinfo = New-Object System.Diagnostics.ProcessStartInfo
-        $pinfo.FileName = $NetbirdExe
-        $pinfo.Arguments = "up --setup-key `"$SetupKey`" --log-level info"
-        $pinfo.RedirectStandardOutput = $true
-        $pinfo.RedirectStandardError = $true
-        $pinfo.UseShellExecute = $false
-        $pinfo.CreateNoWindow = $true
-        $p = New-Object System.Diagnostics.Process
-        $p.StartInfo = $pinfo
-        $p.Start() | Out-Null
-        $finished = $p.WaitForExit(45000)  # 45 second timeout
-        if (-not $finished) { $p.Kill() }
-        $upOutput = $p.StandardOutput.ReadToEnd() + $p.StandardError.ReadToEnd()
-        Write-Log "netbird up output: $upOutput"
+        # Write setup key to a temp file so it is not exposed in process list
+        $keyFile = "$env:TEMP
+b_key_$PID.tmp"
+        Set-Content -Path $keyFile -Value $SetupKey -Encoding UTF8
 
-        # Check for known error conditions
-        if ($upOutput -match "DeadlineExceeded|deadline exceeded|context deadline") {
-            Write-Host "`r  WARN  Cannot reach NetBird server (network timeout).   " -ForegroundColor Yellow
-            Write-Log "Tip: Run manually: netbird up --setup-key $SetupKey" "WARN"
-        } elseif ($upOutput -match "(?i)invalid.*key|(?i)setup.*key.*invalid|(?i)unauthorized") {
-            Write-Host "`r  WARN  Setup key appears invalid or expired.   " -ForegroundColor Yellow
-            Write-Log "Setup key error. Check key in NetBird dashboard." "WARN"
-        } elseif ($upOutput -match "(?i)connected|(?i)already connected|(?i)up") {
+        # Run netbird up - let it run normally (no output redirect)
+        # Use Start-Process with -Wait so we wait for it to complete
+        $upProc = Start-Process -FilePath $NetbirdExe `
+            -ArgumentList "up", "--setup-key", $SetupKey `
+            -Wait -PassThru -WindowStyle Hidden
+
+        Remove-Item $keyFile -ErrorAction SilentlyContinue
+        Write-Log "netbird up exit code: $($upProc.ExitCode)"
+
+        # Give daemon time to register and connect
+        Start-Sleep -Seconds 8
+
+        # Check status
+        $statusOutput = & $NetbirdExe status 2>&1
+        Write-Log "netbird status: $statusOutput"
+
+        if ($statusOutput -match "Management: Connected") {
             Write-Host "`r  OK  Connected to NetBird network.   " -ForegroundColor Green
             Write-Log "NetBird connected successfully."
-        } else {
-            # Check status as fallback
-            Start-Sleep -Seconds 5
-            $statusOutput = & $NetbirdExe status 2>&1
-            Write-Log "netbird status: $statusOutput"
-            if ($statusOutput -match "Management: Connected") {
+        } elseif ($statusOutput -match "LoginFailed") {
+            Write-Host "`r  WARN  Login failed - retrying with setup key...   " -ForegroundColor Yellow
+            Write-Log "LoginFailed detected - retrying netbird up" "WARN"
+
+            # Retry once
+            Start-Process -FilePath $NetbirdExe `
+                -ArgumentList "up", "--setup-key", $SetupKey `
+                -Wait -WindowStyle Hidden
+            Start-Sleep -Seconds 10
+
+            $statusOutput2 = & $NetbirdExe status 2>&1
+            Write-Log "netbird status (retry): $statusOutput2"
+            if ($statusOutput2 -match "Management: Connected") {
                 Write-Host "`r  OK  Connected to NetBird network.   " -ForegroundColor Green
-                Write-Log "NetBird connected (confirmed via status)."
+                Write-Log "NetBird connected on retry."
             } else {
-                Write-Host "`r  WARN  Connection unclear - check NetBird dashboard.   " -ForegroundColor Yellow
-                Write-Log "Status: $statusOutput" "WARN"
+                Write-Host "`r  WARN  Check NetBird dashboard - run: netbird up --setup-key <key>   " -ForegroundColor Yellow
+                Write-Log "Status after retry: $statusOutput2" "WARN"
             }
+        } elseif ($statusOutput -match "DeadlineExceeded|deadline exceeded") {
+            Write-Host "`r  WARN  Cannot reach NetBird server (network timeout).   " -ForegroundColor Yellow
+            Write-Log "Network timeout reaching api.netbird.io" "WARN"
+        } else {
+            Write-Host "`r  WARN  Connection unclear - restart may be needed.   " -ForegroundColor Yellow
+            Write-Log "Status: $statusOutput" "WARN"
         }
     } catch {
         Write-Host "`r  WARN  netbird up error: $_   " -ForegroundColor Yellow
